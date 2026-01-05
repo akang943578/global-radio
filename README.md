@@ -12,6 +12,14 @@
 - 收藏与播放历史
 - 亮色/暗色主题、多语言
 - PWA 安装（桌面/移动端）
+- 
+## 演示站点
+### https://aabb.live
+
+## 应用截图
+![](demo-w.jpg)
+![](demo-b.jpg)
+![](demo-phone.jpg)
 
 ## 目录结构
 
