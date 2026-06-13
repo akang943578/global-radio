@@ -1,7 +1,7 @@
 {
   "name": "radio-app",
   "private": true,
-    "version": "2.0.2",
+  "version": "2.0.3",
   "description": "Global Radio client shell and web app",
   "author": "GlobalRadio",
   "type": "module",
@@ -25,7 +25,6 @@
     "desktop:pack:mac": "electron-builder --mac",
     "release:build": "bash scripts/release-build.sh",
     "release:publish": "bash scripts/release-publish.sh",
-    "version:bump": "node scripts/bump-version.mjs",
     "version:bump": "node scripts/bump-version.mjs",
     "capacitor:init": "npx cap init",
     "capacitor:add-android": "npx cap add android",
@@ -91,7 +90,9 @@
       "target": [
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "artifactName": "GlobalRadio_${version}_${arch}-setup.${ext}",
@@ -106,13 +107,17 @@
       "shortcutName": "GlobalRadio"
     },
     "linux": {
-      "target": ["AppImage"],
+      "target": [
+        "AppImage"
+      ],
       "category": "AudioVideo",
       "artifactName": "GlobalRadio_${version}_${arch}.${ext}",
       "icon": "build/icon.png"
     },
     "mac": {
-      "target": ["dmg"],
+      "target": [
+        "dmg"
+      ],
       "category": "public.app-category.music",
       "artifactName": "GlobalRadio_${version}_${arch}.${ext}",
       "icon": "build/icon.png"

@@ -2,6 +2,13 @@
 
 所有重要变更都会记录在这里。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.0.3] - 2026-06-13
+
+### Fixed
+
+- 已登录用户的 PC 端顶部导航条因为 `TopNavigation.vue` 模板里直接使用了未声明的 `t`，渲染报错导致整条导航不显示 → 改用 `languageStore.t('auth.logoutShort')`，恢复设置 / 主题 / 退出按钮
+- `package.json` `scripts` 中重复的 `version:bump` 键
+
 ## [2.0.2] - 2026-06-13
 
 ### Added
