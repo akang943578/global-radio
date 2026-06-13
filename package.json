@@ -25,6 +25,8 @@
     "desktop:pack:mac": "electron-builder --mac",
     "release:build": "bash scripts/release-build.sh",
     "release:publish": "bash scripts/release-publish.sh",
+    "version:bump": "node scripts/bump-version.mjs",
+    "version:bump": "node scripts/bump-version.mjs",
     "capacitor:init": "npx cap init",
     "capacitor:add-android": "npx cap add android",
     "capacitor:add-ios": "npx cap add ios",
