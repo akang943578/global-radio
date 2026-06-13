@@ -198,7 +198,7 @@
         <div class="space-y-3">
           <div class="flex justify-between">
             <span class="text-ios-gray dark:text-dark-secondary">{{ t('settings.version') }}</span>
-            <span class="text-ios-dark-gray dark:text-dark-text">1.0.0</span>
+            <span class="text-ios-dark-gray dark:text-dark-text">{{ appVersion }}</span>
           </div>
           
           <div class="flex justify-between">
@@ -243,6 +243,8 @@ const authStore = useAuthStore()
 const router = useRouter()
 const { t } = useLanguageStore()
 const toastStore = useToastStore()
+
+const appVersion = __APP_VERSION__
 
 const customMinutes = ref<number>(30)
 const currentPassword = ref('')
