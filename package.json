@@ -25,6 +25,7 @@
     "@heroicons/vue": "^2.0.18",
     "@jofr/capacitor-media-session": "^3.0.3",
     "axios": "^1.6.2",
+    "hls.js": "^1.6.16",
     "pinia": "^2.1.7",
     "vite-plugin-pwa": "^1.0.0",
     "vue": "^3.3.11",
