@@ -50,25 +50,119 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
+  // 把电台 favicon 提前在 JS 端抓成 base64 data URI，再喂给 MediaSession。
+  // 走 data URI 的原因：我们 patch 过的 @jofr/capacitor-media-session 把
+  // 主线程同步 HttpURLConnection 那条 http(s) 抓图路径关掉了（urlToBitmap
+  // 直接返回 null），只保留 base64 解码路径——纯 in-process 不走网络，
+  // 不会阻塞 startForeground 5 秒窗口。
+  // 缓存按 URL 命中，电台切回去 / 重连时秒读不再抓一次。
+  const artworkBase64Cache = new Map<string, string>()
+  let inFlightArtwork: { url: string; promise: Promise<string | null> } | null = null
+
+  const ARTWORK_FETCH_TIMEOUT_MS = 4000
+  const ARTWORK_MAX_BYTES = 256 * 1024 // 256 KB 上限，太大没必要也增加 IPC 压力
+
+  const fetchArtworkAsBase64 = async (url: string): Promise<string | null> => {
+    if (!url || typeof url !== 'string') return null
+    if (!/^https?:\/\//i.test(url)) return null
+
+    const cached = artworkBase64Cache.get(url)
+    if (cached !== undefined) return cached
+
+    if (inFlightArtwork && inFlightArtwork.url === url) {
+      return inFlightArtwork.promise
+    }
+
+    const promise = (async (): Promise<string | null> => {
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), ARTWORK_FETCH_TIMEOUT_MS)
+      try {
+        const response = await fetch(url, {
+          method: 'GET',
+          signal: controller.signal,
+          credentials: 'omit',
+          redirect: 'follow'
+        })
+        if (!response.ok) return null
+
+        const contentType = response.headers.get('content-type') || ''
+        if (contentType && !contentType.startsWith('image/')) {
+          return null
+        }
+
+        const blob = await response.blob()
+        if (blob.size === 0 || blob.size > ARTWORK_MAX_BYTES) return null
+
+        const mime = contentType.startsWith('image/') ? contentType.split(';')[0].trim() : (blob.type || 'image/png')
+
+        const buf = await blob.arrayBuffer()
+        const bytes = new Uint8Array(buf)
+        let binary = ''
+        const chunk = 0x8000
+        for (let i = 0; i < bytes.length; i += chunk) {
+          binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + chunk)))
+        }
+        const base64 = btoa(binary)
+        return `data:${mime};base64,${base64}`
+      } catch (err) {
+        console.warn('[mediaSession] artwork fetch failed:', err)
+        return null
+      } finally {
+        clearTimeout(timeoutId)
+      }
+    })()
+
+    inFlightArtwork = { url, promise }
+    try {
+      const dataUri = await promise
+      artworkBase64Cache.set(url, dataUri || '')
+      return dataUri
+    } finally {
+      if (inFlightArtwork && inFlightArtwork.url === url) {
+        inFlightArtwork = null
+      }
+    }
+  }
+
   const announceNativeMetadata = async (station: RadioStation) => {
     if (!Capacitor.isNativePlatform()) return
-    try {
-      // 故意不传 artwork：@jofr/capacitor-media-session 的 Android 实现
-      // 会在主线程做一次同步 HttpURLConnection 抓 artwork 转 Bitmap
-      // (urlToBitmap)，没有任何超时设置。一旦 station.favicon 慢/挂/CORS
-      // 拦截，setMetadata 整个抛 IOException，后面的 setPlaybackState
-      // 时序乱掉，service 都来不及 bind，导致下拉通知栏的 MediaStyle
-      // 大卡片完全消失（系统设置里都不会出现 "Playback" 通知 channel）。
-      // 牺牲掉封面图换稳定的播放卡片，对收音机这类应用是合算的。
-      await MediaSession.setMetadata({
-        title: station.name || 'GlobalRadio',
-        artist: station.country || 'GlobalRadio',
-        album: station.tags || 'Radio',
-        artwork: []
-      })
-    } catch (error) {
-      console.warn('[mediaSession] setMetadata failed:', error)
+
+    const baseMetadata = {
+      title: station.name || 'GlobalRadio',
+      artist: station.country || 'GlobalRadio',
+      album: station.tags || 'Radio'
     }
+
+    // 第一帧：不带 artwork 立刻把大卡片贴出来，绝对不阻塞 startForeground 5s 窗口
+    try {
+      await MediaSession.setMetadata({ ...baseMetadata, artwork: [] })
+    } catch (error) {
+      console.warn('[mediaSession] setMetadata (no artwork) failed:', error)
+    }
+
+    // 第二帧：异步抓取 favicon -> base64 data URI，回来再 setMetadata 一次。
+    // 走 cache，电台切回去秒读。失败了就保持没图状态，不影响卡片本身。
+    const faviconUrl = station.favicon
+    if (!faviconUrl) return
+
+    const announceStation = station
+    fetchArtworkAsBase64(faviconUrl)
+      .then(async (dataUri) => {
+        if (!dataUri) return
+        // 用户已经切到别的电台了就不要覆盖当前 metadata
+        if (currentStation.value?.stationuuid !== announceStation.stationuuid) return
+        try {
+          await MediaSession.setMetadata({
+            ...baseMetadata,
+            artwork: [{ src: dataUri, sizes: '512x512', type: dataUri.slice(5, dataUri.indexOf(';')) || 'image/png' }]
+          })
+        } catch (err) {
+          console.warn('[mediaSession] setMetadata (with artwork) failed:', err)
+        }
+      })
+      .catch((err) => {
+        console.warn('[mediaSession] artwork pipeline failed:', err)
+      })
   }
 
   const announceNativePlaybackState = async (state: 'playing' | 'paused' | 'none') => {

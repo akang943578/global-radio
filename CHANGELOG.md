@@ -2,6 +2,25 @@
 
 所有重要变更都会记录在这里。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.0.16] - 2026-06-14
+
+### Fixed
+
+- **下拉播放卡片上的电台 logo（artwork）缺失** —— v2.0.14/v2.0.15 为了让 MediaStyle 大卡片稳定显示，`announceNativeMetadata()` 里硬塞了 `artwork: []`，因为 `@jofr/capacitor-media-session` 的 Android `urlToBitmap` 会在主线程同步 `HttpURLConnection` 抓 favicon，没有超时，favicon 慢 / 挂 / CORS 拦截就把 setMetadata 整个干掉、连带 startForeground 5s 窗口都错过。代价是卡片上没图。
+- 修复：在 JS 端**异步**拿 favicon 转 base64 data URI，再传给 `MediaSession.setMetadata`。原理：我们已经 patch 过的 Android 端 `urlToBitmap` 仍然支持 `data:image/...;base64,...` 路径（纯 in-process 解码，零网络 IO），所以 base64 data URI 给原生不会再阻塞主线程：
+  - 4 秒 `AbortController` 超时 + `credentials: 'omit'`，favicon 服务器再烂也不会卡住；
+  - 256 KB 上限 + Content-Type 校验，防止误拉到 HTML/巨图；
+  - 按 URL Map 缓存，电台切回去 / metadata 重播秒读不再抓一次；
+  - **两步法**：先无 artwork `setMetadata` 一次让大卡片立刻贴出来（保证 startForeground 时序），抓完图后再 `setMetadata` 第二次替换为带图版本；
+  - 抓图过程中如果用户已经切到别的电台，跳过覆盖，避免错位。
+
+- **搜索按钮"输入文字后依然浅蓝（看上去 disabled）"** —— v2.0.14 引入了 `hasInputText` ref 直接从 DOM input 同步，按钮 class 也用上了，但用户反馈仍然没变蓝。根因有两条同时存在：
+  1. Tailwind v3 的 `bg-ios-blue/40` 这个 opacity-modifier 类没被打包到 production CSS（content extractor 没扫到 / purge 误杀），所以"未激活态"压根没有正确背景色；
+  2. `hasInputText` 单一依赖 `@input/@keyup/@composition*` 事件回调里读 DOM `input.value`，Android WebView 在 IME composition 阶段读出来是空串，更新滞后。
+- 修复：
+  - 按钮颜色改用 `:style` 内联 `backgroundColor: '#007AFF'` / `rgba(0, 122, 255, 0.4)`，完全绕开 Tailwind purge，class 链彻底干净；
+  - 新增 `isSearchButtonActive = computed(() => hasInputText.value || hasSearchText.value)`，两路反应源任意一个为真就变蓝——v-model（`hasSearchText`）覆盖一般 / 英文输入，DOM 实时同步（`hasInputText`）覆盖 IME composition 滞后场景。
+
 ## [2.0.15] - 2026-06-14
 
 ### Fixed

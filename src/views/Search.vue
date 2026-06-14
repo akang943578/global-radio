@@ -81,11 +81,13 @@
             type="button"
             @click="handleSearchButtonClick"
             :class="[
-              'p-1.5 rounded-full transition-colors',
-              hasInputText
-                ? 'bg-ios-blue text-white hover:bg-blue-600 active:bg-blue-700'
-                : 'bg-ios-blue/40 text-white/80'
+              'p-1.5 rounded-full transition-colors text-white',
+              isSearchButtonActive ? 'hover:bg-blue-600 active:bg-blue-700' : ''
             ]"
+            :style="{
+              backgroundColor: isSearchButtonActive ? '#007AFF' : 'rgba(0, 122, 255, 0.4)',
+              color: isSearchButtonActive ? '#ffffff' : 'rgba(255, 255, 255, 0.85)'
+            }"
             :title="t('search.search')"
           >
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -295,6 +297,11 @@ const hasSearchText = computed(() => {
 // 直接从 DOM input 同步出来的"有没有文字"状态——专门给按钮视觉用。
 // 详见 syncInputHasText() 注释。
 const hasInputText = ref(false)
+
+// 按钮变蓝条件：v-model 或 DOM 实时同步任意一个为真即可。
+// 双保险：v-model 在英文输入 / 一般场景下立刻更新；hasInputText 兜底
+// Android WebView IME composition 阶段 v-model 滞后的情况。
+const isSearchButtonActive = computed(() => hasInputText.value || hasSearchText.value)
 
 // 移动端输入法状态追踪
 const isMobile = ref(false)
