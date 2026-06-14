@@ -22,7 +22,7 @@ cat > "$BODY_FILE" <<EOF
 提供 Windows 64 位、iPhone、Android 客户端。
 如出现异常，请清除应用缓存即可。
 
-本 fork 在 [moli-xia/global-radio](https://github.com/moli-xia/global-radio) 的客户端壳基础上新增多用户登录、服务端数据同步、HLS 流代理等能力。
+包含多用户登录、服务端数据同步、HLS 流代理、三端原生壳与完整 CI/CD 流程。
 
 构建版本: ${VERSION}
 EOF

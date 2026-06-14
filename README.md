@@ -1,10 +1,11 @@
 # 全球电台（GlobalRadio）
 
-这是一个基于 Vue 3 + Vite 的在线电台应用，包含播放、搜索、收藏、历史记录、主题切换与多国语言等功能，并支持 PWA 安装。
+[![Release](https://img.shields.io/github/v/release/akang943578/global-radio?label=release)](https://github.com/akang943578/global-radio/releases)
+[![License](https://img.shields.io/github/license/akang943578/global-radio)](LICENSE)
 
-除 Web 版本外，仓库还内置了**多用户登录与云端同步**、**HLS 流代理后端**，以及 **Android / iOS / Windows 客户端**，可单独使用也可一起部署。
+一个基于 Vue 3 + Vite 的全栈在线电台应用：包含播放、搜索、收藏、历史记录、主题切换、多国语言等功能，并支持 PWA 安装。
 
-支持 Docker 一键部署（推荐）与本地开发运行。
+除 Web 版本外，仓库还内置了**多用户登录与云端同步**、**HLS 流代理后端**，以及 **Android / iOS / Windows 客户端**，可单独使用也可一起部署。支持 Docker 一键部署（推荐）与本地开发运行。
 
 ## 功能概览
 
@@ -18,12 +19,6 @@
 - Android / iPhone / Windows 客户端
 - 多用户登录，收藏 / 历史 / 语言 / 主题云端同步
 - BBC、NHK 等 HLS 电台在 HTTPS 站点的播放支持（内置 stream-proxy）
-
-## 演示站点
-
-### https://aabb.live
-
-### 现已加入 https://kejilion.sh 科技 lion 的脚本，实现一键安装并配置域名和 SSL 证书功能。
 
 ## 应用截图
 
@@ -125,7 +120,7 @@ docker run -d --name global-radio --restart unless-stopped -p 8080:80 global-rad
 ## 获取源码
 
 ```bash
-git clone https://github.com/moli-xia/global-radio.git
+git clone https://github.com/akang943578/global-radio.git
 cd global-radio
 ```
 
@@ -343,3 +338,28 @@ npm run preview -- --host 0.0.0.0 --port 4173
 ```properties
 sdk.dir=/path/to/Android/Sdk
 ```
+
+## Acknowledgments
+
+GlobalRadio 的前端 Vue 单页应用最早借鉴了
+[moli-xia/global-radio](https://github.com/moli-xia/global-radio) 的早期实现思路与 iOS 风格 UI 设计。
+此后本项目独立演进，主要新增能力包括：
+
+- 多用户登录与服务端数据同步（`stream-proxy/` 下的认证 + 用户数据 API）
+- HLS 流代理（解决 HTTPS 页面播放 HTTP 流的 mixed-content 问题）
+- `radio-browser.info` 反向代理与多节点粘性轮询失败转移
+- Android / iOS / Windows 三端原生壳（Capacitor + Electron），含右上角「服务器设置」与 14 种本地化文案
+- Android 媒体前台服务、`MediaSession` 锁屏控件、息屏续播自愈
+- 完整的 CI/CD 流程：GitHub Actions 三端并行构建、Release keystore 签名、ARM64 Docker 镜像自动推送、SSH 自动部署
+- Docker Compose 一键部署与生产 Nginx 配置
+
+如原作者对当前的归属或再分发方式有任何疑问，欢迎在
+[Issues](https://github.com/akang943578/global-radio/issues) 提出，我们将本着诚意尽快沟通处理。
+
+## License
+
+本项目采用 [MIT License](LICENSE)。Copyright (c) 2026 Kang Hao (@akang943578)。
+
+> 注：上游 `moli-xia/global-radio` 仓库未声明明确开源协议。本仓库的 MIT License
+> 覆盖本仓库下的全部源代码；如读者希望在商业场景中复用其中明显源自上游的早期
+> 客户端壳设计，建议同时联系上游作者获取额外授权。

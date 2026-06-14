@@ -209,12 +209,12 @@
           <div class="flex justify-between items-center gap-3">
             <span class="text-ios-gray dark:text-dark-secondary">GitHub</span>
             <a
-              href="https://github.com/moli-xia/global-radio"
+              href="https://github.com/akang943578/global-radio"
               target="_blank"
               rel="noopener noreferrer"
               class="text-ios-blue hover:underline truncate"
             >
-              moli-xia/global-radio
+              akang943578/global-radio
             </a>
           </div>
         </div>
