@@ -221,34 +221,40 @@ jobs:
             CHANGELOG_SECTION="(未找到 \`CHANGELOG.md\` 中对应 \`$VERSION\` 的条目，请补充。)"
           fi
 
-          BODY=$(cat <<EOF
-$CHANGELOG_SECTION
+          # Build release notes into a file. Avoid heredoc here: heredoc bodies
+          # have to stay inside the YAML block-scalar indentation, but any
+          # leading whitespace also leaks into the markdown (4+ leading spaces
+          # turns a line into a code block on GitHub). Echo per line keeps the
+          # file content clean while honoring YAML indentation.
+          BODY_FILE="$RUNNER_TEMP/release-body.md"
+          {
+            echo "$CHANGELOG_SECTION"
+            echo ""
+            echo "---"
+            echo ""
+            echo "提供 Windows 64 位 / iPhone / Android 客户端，如有异常请清除应用缓存重试。"
+            echo ""
+            echo "### 下载"
+            echo "- \`GlobalRadio-v${VERSION}.apk\` — Android release APK (shell mode)"
+            echo "- \`GlobalRadio-${VERSION}.ipa\` — iOS unsigned IPA (sideload only; 未签名 App Store)"
+            echo "- \`GlobalRadio_${VERSION}_x64-setup.exe\` — Windows 64-bit installer (Electron NSIS)"
+            echo ""
+            echo "完整变更历史详见 [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)。"
+          } > "$BODY_FILE"
 
----
-
-提供 Windows 64 位 / iPhone / Android 客户端，如有异常请清除应用缓存重试。
-
-### 下载
-- \`GlobalRadio-v${VERSION}.apk\` — Android release APK (shell mode)
-- \`GlobalRadio-${VERSION}.ipa\` — iOS unsigned IPA (sideload only; 未签名 App Store)
-- \`GlobalRadio_${VERSION}_x64-setup.exe\` — Windows 64-bit installer (Electron NSIS)
-
-完整变更历史详见 [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/main/CHANGELOG.md)。
-EOF
-)
           echo "--- Release notes preview ---"
-          echo "$BODY"
+          cat "$BODY_FILE"
           echo "--- End preview ---"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" release/* --clobber
             # Refresh notes too in case CHANGELOG was updated since the
             # release was first published (e.g. re-running the workflow).
-            gh release edit "$TAG" --notes "$BODY"
+            gh release edit "$TAG" --notes-file "$BODY_FILE"
           else
             gh release create "$TAG" release/* \
               --title "各平台客户端 $TAG" \
-              --notes "$BODY" \
+              --notes-file "$BODY_FILE" \
               --latest
           fi
 
