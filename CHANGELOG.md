@@ -2,6 +2,13 @@
 
 所有重要变更都会记录在这里。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.0.10] - 2026-06-14
+
+### Fixed
+
+- **搜索页：手机端搜索按钮"出不来"** —— 之前搜索按钮带着 `v-if="searchQuery && searchQuery.trim()"`，必须等用户已经在输入框里敲了字才会出现。这在 Android Capacitor WebView 上特别容易翻车：v-model 配合自定义 `@input` 在中文输入法 composition 阶段时序不稳，按钮要么晚出现要么干脆不刷新，用户的本能反应就是"按钮没了，没法搜索"。
+- 现在按钮**永远显示**：输入框为空时按钮显示成灰色禁用状态，输入文本后变蓝可点。同时按钮稍微放大（`p-1.5`）方便拇指点击。`hasSearchText` 改用 `computed` 防御异常状态，避免 reactivity 跑偏时按钮闪。
+
 ## [2.0.9] - 2026-06-14
 
 ### Security
