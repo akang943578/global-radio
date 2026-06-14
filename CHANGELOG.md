@@ -2,6 +2,19 @@
 
 所有重要变更都会记录在这里。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.0.4] - 2026-06-14
+
+### Fixed
+
+- **Android 锁屏几秒内播放停止** —— 之前 `AndroidManifest` 声明了 `MediaPlaybackService` 但根本没有对应的 Java 实现，前台服务从未真正启动。现在补齐 `MediaPlaybackService.java`：启动后获取 `PARTIAL_WAKE_LOCK` + `WifiLock(WIFI_MODE_FULL_LOW_LATENCY)`，显示常驻媒体通知，确保 WebView 在锁屏后不被 Doze 节流。
+- `player.ts` 之前只调用 `MediaSession.setActionHandler` 注册回调，从未调用 `setMetadata` / `setPlaybackState`。现在在播放/暂停/恢复/停止时都正确通知系统，锁屏页和通知栏可以显示当前电台。
+
+### Added
+
+- 新增 Capacitor 插件 `BackgroundAudio`（`start/stop`），从 JS 端启停前台服务并附带电台名/国别作为通知内容。
+- 检测到小米/红米/POCO 设备时，首次启动会弹出一次性引导，指导用户在 MIUI 设置中放行自启动、关闭省电策略、允许通知、锁定任务卡片。
+- 新增权限：`FOREGROUND_SERVICE_MEDIA_PLAYBACK`（Android 14+ 必需）、`POST_NOTIFICATIONS`（Android 13+ 通知需要）。
+
 ## [2.0.3] - 2026-06-13
 
 ### Fixed

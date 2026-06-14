@@ -8,8 +8,8 @@ android {
         applicationId "com.globalradio.app"
         minSdk rootProject.ext.minSdkVersion
         targetSdk rootProject.ext.targetSdkVersion
-        versionCode 5
-        versionName "2.0.3"
+        versionCode 6
+        versionName "2.0.4"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged APK

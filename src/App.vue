@@ -30,6 +30,9 @@
     
     <!-- 返回顶部按钮 -->
     <BackToTopButton />
+
+    <!-- 小米后台播放设置引导（仅 Xiaomi/Redmi/POCO 首次展示） -->
+    <MiuiBackgroundGuide />
   </div>
 </template>
 
@@ -47,6 +50,7 @@ import TopNavigation from '@/components/TopNavigation.vue'
 import ErrorToast from '@/components/ErrorToast.vue'
 import ToastContainer from '@/components/ToastContainer.vue'
 import BackToTopButton from '@/components/BackToTopButton.vue'
+import MiuiBackgroundGuide from '@/components/MiuiBackgroundGuide.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useUserSyncStore } from '@/stores/userSync'
 

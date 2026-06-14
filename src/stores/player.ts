@@ -6,9 +6,9 @@ import { useHistoryStore } from './history'
 import { mediaSessionManager } from '@/utils/mediaSession'
 import { deviceOptimization } from '@/utils/deviceOptimization'
 import { isHlsStream, resolveStreamUrl, supportsNativeHls } from '@/utils/streamUrl'
-// MediaControl插件已移除
 import { Capacitor } from '@capacitor/core'
 import { MediaSession } from '@jofr/capacitor-media-session'
+import { startBackgroundAudio, stopBackgroundAudio } from '@/utils/backgroundAudio'
 
 export const usePlayerStore = defineStore('player', () => {
   // 状态
@@ -32,6 +32,32 @@ export const usePlayerStore = defineStore('player', () => {
     if (hlsInstance.value) {
       hlsInstance.value.destroy()
       hlsInstance.value = null
+    }
+  }
+
+  const announceNativeMetadata = async (station: RadioStation) => {
+    if (!Capacitor.isNativePlatform()) return
+    try {
+      const artwork = station.favicon
+        ? [{ src: station.favicon, sizes: '512x512', type: 'image/png' }]
+        : []
+      await MediaSession.setMetadata({
+        title: station.name || 'GlobalRadio',
+        artist: station.country || 'GlobalRadio',
+        album: station.tags || 'Radio',
+        artwork
+      })
+    } catch (error) {
+      console.warn('[mediaSession] setMetadata failed:', error)
+    }
+  }
+
+  const announceNativePlaybackState = async (state: 'playing' | 'paused' | 'none') => {
+    if (!Capacitor.isNativePlatform()) return
+    try {
+      await MediaSession.setPlaybackState({ playbackState: state })
+    } catch (error) {
+      console.warn('[mediaSession] setPlaybackState failed:', error)
     }
   }
 
@@ -273,9 +299,12 @@ export const usePlayerStore = defineStore('player', () => {
       }
       
       console.log(`成功播放电台: ${station.name}`)
-      
-      // 媒体控制代码已移除
-      
+
+      mediaSessionManager.updateMetadata(station)
+      mediaSessionManager.updatePlaybackState(true)
+      await announceNativeMetadata(station)
+      await announceNativePlaybackState('playing')
+      await startBackgroundAudio(station)
     } catch (playError) {
       console.error(`播放重试 (重试 ${retryCount}/${maxRetries}):`, playError)
       
@@ -299,6 +328,8 @@ export const usePlayerStore = defineStore('player', () => {
     if (audio.value) {
       audio.value.pause()
     }
+    mediaSessionManager.updatePlaybackState(false)
+    await announceNativePlaybackState('paused')
   }
 
   // 恢复播放
@@ -306,6 +337,9 @@ export const usePlayerStore = defineStore('player', () => {
     if (audio.value && currentStation.value) {
       try {
         await audio.value.play()
+        mediaSessionManager.updatePlaybackState(true)
+        await announceNativePlaybackState('playing')
+        await startBackgroundAudio(currentStation.value)
       } catch (err) {
         console.error('恢复播放失败')
         console.error('恢复播放错误:', err)
@@ -325,6 +359,8 @@ export const usePlayerStore = defineStore('player', () => {
     isPlaying.value = false
     currentStation.value = null
     mediaSessionManager.clear()
+    await announceNativePlaybackState('none')
+    await stopBackgroundAudio()
     
     // 停止播放时释放唤醒锁
     deviceOptimization.releaseWakeLock()

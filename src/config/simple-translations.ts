@@ -217,6 +217,18 @@ export const createSimpleTranslations = (): Record<SupportedLanguage, any> => {
       next: 'Next',
       previous: 'Previous',
       unknown: 'Unknown'
+    },
+    miuiGuide: {
+      title: 'Xiaomi background playback setup',
+      subtitle: 'Keep listening after the screen turns off',
+      intro: 'We detected a Xiaomi/Redmi/POCO device. By default MIUI kills background audio within seconds after lock. Please follow these steps:',
+      step1: 'Open Settings → Apps → Manage apps → GlobalRadio → Autostart, and enable "Allow autostart"',
+      step2: 'Back one level → "Battery saver" → choose "No restrictions"',
+      step3: 'In "Notifications", allow the playback notification to be shown',
+      step4: 'In the recent apps screen, swipe down on the app card to lock it so quick-clean won\'t evict it',
+      footer: 'After this one-time setup, playback will keep running smoothly with the screen off.',
+      gotIt: 'Got it',
+      dontShowAgain: "Don't show again"
     }
   }
 
@@ -434,6 +446,18 @@ export const createSimpleTranslations = (): Record<SupportedLanguage, any> => {
         next: '下一个',
         previous: '上一个',
         unknown: '未知'
+      },
+      miuiGuide: {
+        title: '小米手机后台播放设置',
+        subtitle: '让锁屏后也能继续听电台',
+        intro: '检测到你在使用小米/红米/POCO 设备。MIUI 默认会在锁屏后几秒杀掉后台音频，请按以下步骤放行：',
+        step1: '进入"设置 → 应用设置 → 应用管理 → 全球电台 → 自启动管理"，打开"允许自启动"',
+        step2: '回到上一级，进入"省电策略"，选择"无限制"',
+        step3: '在"通知管理"中允许"播放通知"显示',
+        step4: '在最近任务里向下拉锁定 App 卡片，避免被一键清理回收',
+        footer: '完成后即使锁屏也能稳定后台播放。一次设置永久生效。',
+        gotIt: '我已设置',
+        dontShowAgain: '不再提示'
       }
     },
     en: baseTranslation,
