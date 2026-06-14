@@ -2,6 +2,22 @@
 
 所有重要变更都会记录在这里。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.0.9] - 2026-06-14
+
+### Security
+
+- **使用正经的 release keystore 签名 APK** —— 之前所有 release 包都是用 SDK 自带的 debug keystore 签的，导致：
+  - Google Play Protect 每次安装都报"未检测到此开发者上提供的应用，可能不安全"
+  - 不同 CI runner 上 debug key 不同，每次升级强制要求用户卸载重装
+  - debug key 是所有 Android 开发者机器上随机生成的，安全模型上接近裸奔
+
+  现在使用一份独立生成的 RSA 2048 release keystore（有效期到 2053 年），keystore 文件存放在 GitHub Secrets（base64 编码），CI 在每次构建时解码并签名。本地构建从 `android/keystore.properties` 读取（已加入 `.gitignore`），没配置时退回 debug 签名以保证 `assembleDebug` 仍可用。
+
+  **⚠️ 从 v2.0.6 / 2.0.7 / 2.0.8 升级到 v2.0.9 需要先卸载旧版本再安装**——这是 Android 平台要求，签名变更后无法直接覆盖安装。这一刀切完，从 v2.0.9 起所有后续版本都可以丝滑覆盖升级，Play Protect 也只会在用户首次安装该签名时提示一次，之后版本不再触发。
+
+  Release keystore SHA-256 指纹：
+  `9B:C9:13:97:D5:59:F8:7F:E5:7F:2D:99:92:6D:A9:2A:CA:13:A9:B8:59:AD:AB:51:EB:25:AC:BF:A3:6E:AF:19`
+
 ## [2.0.8] - 2026-06-14
 
 ### Fixed
