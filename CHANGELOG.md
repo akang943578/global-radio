@@ -2,6 +2,32 @@
 
 所有重要变更都会记录在这里。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.0.24] - 2026-06-15
+
+### Fixed
+
+- **修复偶发的已取消收藏的电台再次出现**。复现：在某设备上取消收藏 B → 1 秒之内关掉浏览器（v2.0.23 的 push 防抖窗口） → push 没发出去 → 服务端仍是 `[A, B, C]` → 下次任何浏览器/设备打开 → pull 服务器 `[A, B, C]`，本地 `[A, C]`，旧的 set-union 合并把 B 当成"另一台设备加的新电台"，结果 `[A, C, B]` —— **B 复活**。
+- 修复方式（多管齐下）：
+  - **删除操作绕过防抖直接 push**：`src/stores/player.ts` 的 `removeFavorite` / `clearFavorites` 不再走 `scheduleUserDataPush()`（200 ms debounce），改走新增的 `saveFavoritesImmediate()` → `pushUserDataNow()` → 立即调 `pushToServer`。其他操作（添加收藏、设置改动）仍走 200 ms debounce 路径，节流压力小。
+  - **防抖窗口 1000 ms → 200 ms**（`src/stores/userSync.ts` `schedulePushToServer`）。意外关页面最多丢 200 ms 的非删除变更。
+  - **关页面前最后一搏 flush**：`useUserSyncStore` 内部维护 `pendingPushPayload` ref，每次 `collectLocalUserData()` 同步刷新；`window.addEventListener('beforeunload' / 'pagehide')` 用 `fetch('/api/user/data', { method: 'PUT', credentials: 'include', keepalive: true, ... })` 把还没出门的 payload 送出去。**走 `fetch keepalive` 而不是 `navigator.sendBeacon`** —— 后者只支持 POST，我们的服务端 `/api/user/data` 只接受 PUT；`keepalive: true` 是现代标准做法，支持任意 method，64 KB body cap 完全够用。Chrome 80+ / Safari 13+ 支持，正好是我们已经要求的版本。
+  - **本地 vs 服务端 updatedAt 比对兜底**：新增 localStorage key `radio-data-updated-at`，每次 `collectLocalUserData()` 在写出 payload 前先把它的 `updatedAt` 持久化下来。`pullFromServer` 拉到 `serverData.updatedAt` 后比较：本地新于服务端 → 说明上一次 push 没成（被关页面/网络抖动吞了），**这一轮跳过 merge，反过来把本地推上服务端**，由本地为准。这样即使 beforeunload flush 也没成（极端情况），下次开浏览器拉一次就能修复。
+- **收藏排序以服务端为准，多端同步**。v2.0.23 把方向搞反了：合并代码是"以本地为准"，意味着设备 A 拖动重排后推到服务端，设备 B 下次 pull 时仍保留自己的旧顺序——多端没法同步。改成 server-canonical：
+  - `mergeFavorites` 从"先 walk local、加 server-only 在末尾"改成"先 copy server 数组（顺序、metadata 全部以服务端为准）、把仅本地有的（未推送的新增）追加在末尾"。
+  - 配合 200 ms 防抖 + delete-immediate-push + beforeunload flush，设备 A 拖完几乎瞬间到达服务端；设备 B pull 时直接取 server 顺序。
+  - 单设备的拖完→刷新流程也工作得正确：拖 → 200 ms 后 push 到服务端 → 刷新 → pull 拿回服务端的（自己刚推的）顺序。
+
+### Tested
+
+- `mergeFavorites` 单元测试脚本 `/tmp/v224-merge-tests.mjs`，7 个 case 覆盖 deleted-on-local / 跨设备 reorder / 跨设备 add / 本地未推送 add / 空服务端 / 等同 / metadata 时间戳更新。完整输出见 `/tmp/v224-merge-tests.txt`。v2.0.24 vs v2.0.23 side-by-side 对照证明 case 2-3 之前是 BUG（被 v2.0.23 的本地优先压住了多端同步），case 1 (resurrect) 由 mergeFavorites 单独无法解决，必须配合 `pullFromServer` 内的 `localUpdatedAt > serverUpdatedAt` 守护跳过 merge 直接推本地。
+- Vite production build 通过：`✓ built in 3.x s`，bundle 大小相比 v2.0.23 没有变化（无新依赖，仅逻辑改动）。
+- TypeScript：与 v2.0.18+ baseline 一致，无新增错误。
+- 真机验证（拖完 / 删完关页面 / 多端同步）需要 POCO F5 + 第二台设备同账号配合，emulator 仍受 host RAM 限制无法正常 boot（同 v2.0.22-v2.0.23 状况）。
+
+### Note
+
+- 服务端 `stream-proxy/server.mjs` `handleUserData` 未改动，仍然只接受 PUT，鉴权走 cookie。`fetch keepalive` 路径完全兼容现有路由。
+
 ## [2.0.23] - 2026-06-15
 
 ### Added

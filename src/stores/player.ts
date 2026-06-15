@@ -912,7 +912,11 @@ export const usePlayerStore = defineStore('player', () => {
     const index = favorites.value.findIndex(fav => fav.stationuuid === stationUuid)
     if (index > -1) {
       favorites.value.splice(index, 1)
-      saveFavorites()
+      // v2.0.24: deletions push immediately (no debounce window).
+      // The 200ms debounce tolerates accidental tab-close for adds /
+      // settings, but losing a deletion would let the entry resurrect on
+      // the next pull, which is what the user reports. Bypass.
+      saveFavoritesImmediate()
     }
   }
 
@@ -924,7 +928,8 @@ export const usePlayerStore = defineStore('player', () => {
   // 清空收藏夹
   const clearFavorites = () => {
     favorites.value = []
-    saveFavorites()
+    // v2.0.24: same reasoning as removeFromFavorites — immediate push.
+    saveFavoritesImmediate()
   }
 
   // v2.0.23: 自定义排序。Favorites.vue 里 vue-draggable-plus 拖完会回调
@@ -968,6 +973,17 @@ export const usePlayerStore = defineStore('player', () => {
     localStorage.setItem('radio-favorites', JSON.stringify(favorites.value))
     import('@/services/userDataSyncTrigger').then(({ scheduleUserDataPush }) => {
       scheduleUserDataPush()
+    })
+  }
+
+  // v2.0.24: same as saveFavorites but pushes to server *immediately*
+  // (no 200ms debounce). Called by destructive ops (remove / clear) to
+  // make sure a deletion never gets stuck in the debounce queue when
+  // the user closes the tab right away.
+  const saveFavoritesImmediate = () => {
+    localStorage.setItem('radio-favorites', JSON.stringify(favorites.value))
+    import('@/services/userDataSyncTrigger').then(({ pushUserDataNow }) => {
+      pushUserDataNow()
     })
   }
 

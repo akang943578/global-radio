@@ -12,6 +12,7 @@ import { useThemeStore } from '@/stores/theme'
 import { useLanguageStore } from '@/stores/language'
 
 const LOCAL_USER_KEY = 'global-radio-local-user'
+const LOCAL_UPDATED_AT_KEY = 'radio-data-updated-at'
 
 function getLocalUserMarker(): string | null {
   return localStorage.getItem(LOCAL_USER_KEY)
@@ -25,37 +26,40 @@ function setLocalUserMarker(username: string | null) {
   }
 }
 
-function mergeFavorites(server: FavoriteStation[], local: FavoriteStation[]): FavoriteStation[] {
-  // v2.0.23: respect explicit user reorder. When the same station exists
-  // on both ends, the LOCAL position wins — that's the result of the
-  // user's drag-and-drop on this device, and re-sorting by addedAt would
-  // throw it away on every server pull. Per-item metadata (e.g., a newer
-  // addedAt from a different device) still uses the most-recent record.
-  // Stations only on the server (added on another device, not yet on
-  // this one) get appended at the end in addedAt-desc order — putting
-  // them at top would override the explicit local order users just set.
-  const localUuids = new Set(local.map(f => f.stationuuid))
-  const serverById = new Map(server.map(f => [f.stationuuid, f]))
+function getLocalUpdatedAt(): string | null {
+  return localStorage.getItem(LOCAL_UPDATED_AT_KEY)
+}
 
-  const result: FavoriteStation[] = []
+function setLocalUpdatedAt(value: string | null) {
+  if (value) {
+    localStorage.setItem(LOCAL_UPDATED_AT_KEY, value)
+  } else {
+    localStorage.removeItem(LOCAL_UPDATED_AT_KEY)
+  }
+}
+
+// v2.0.24: server-canonical merge. Walking server first means:
+//   * Order on the server defines order for the device that just pulled —
+//     so if device A drags-reorders + pushes, device B pulls and gets the
+//     same order. (v2.0.23's local-canonical version had it backwards:
+//     each device kept its own order on pull.)
+//   * Deletions stick: if the user removes B on device A, after a successful
+//     push the server has [A, C]. Device A pulls → result is [A, C], not
+//     [A, C, B-resurrected].
+// Local-only entries (present on local but not on server) are appended at
+// the end. They represent unsynced local additions (push hasn't acked yet)
+// — emptying them would lose a fresh add. The companion
+// `localUpdatedAt > serverUpdatedAt` short-circuit in `pullFromServer`
+// also handles this case for the "removed locally, push lost on tab close"
+// scenario, by pushing local instead of merging.
+function mergeFavorites(server: FavoriteStation[], local: FavoriteStation[]): FavoriteStation[] {
+  const serverUuids = new Set(server.map(f => f.stationuuid))
+  const result: FavoriteStation[] = server.map(f => ({ ...f }))
   for (const item of local) {
-    const serverEntry = serverById.get(item.stationuuid)
-    if (
-      serverEntry &&
-      new Date(serverEntry.addedAt).getTime() > new Date(item.addedAt).getTime()
-    ) {
-      // Prefer the newer record's metadata, but keep this position.
-      result.push(serverEntry)
-    } else {
+    if (!serverUuids.has(item.stationuuid)) {
       result.push(item)
     }
   }
-
-  const serverOnly = server
-    .filter(f => !localUuids.has(f.stationuuid))
-    .sort((a, b) => new Date(b.addedAt).getTime() - new Date(a.addedAt).getTime())
-  result.push(...serverOnly)
-
   return result
 }
 
@@ -99,13 +103,20 @@ export const useUserSyncStore = defineStore('userSync', () => {
   const syncedForUser = ref<string | null>(null)
   const syncing = ref(false)
 
+  // v2.0.24: holds the most recent payload that wants to go to the server.
+  // Updated synchronously by every collect call. Used by the
+  // `beforeunload` flush so we don't lose a debounced push when the user
+  // closes the tab. Also gives `pushToServer` a way to send an exact known
+  // snapshot.
+  let pendingPushPayload: UserData | null = null
+
   function collectLocalUserData(): UserData {
     const playerStore = usePlayerStore()
     const historyStore = useHistoryStore()
     const themeStore = useThemeStore()
     const languageStore = useLanguageStore()
 
-    return {
+    const payload: UserData = {
       ...EMPTY_USER_DATA,
       updatedAt: new Date().toISOString(),
       favorites: [...playerStore.favorites],
@@ -118,6 +129,15 @@ export const useUserSyncStore = defineStore('userSync', () => {
         language: languageStore.currentLanguage
       }
     }
+
+    // v2.0.24: persist updatedAt locally BEFORE any push attempt so the
+    // pull-side conflict resolver can see "I have local changes that
+    // never made it to server" if our push gets dropped (e.g. tab closed
+    // mid-debounce, network glitch). See pullFromServer below.
+    setLocalUpdatedAt(payload.updatedAt)
+
+    pendingPushPayload = payload
+    return payload
   }
 
   function applySettings(settings: UserSettings) {
@@ -176,13 +196,20 @@ export const useUserSyncStore = defineStore('userSync', () => {
 
     const payload = collectLocalUserData()
     await saveUserData(payload)
+    // Successful push — local & server now agree. Clear the pending
+    // payload so beforeunload doesn't re-flush the same one.
+    pendingPushPayload = null
   }
 
+  // v2.0.24: 1000ms → 200ms. Made the trailing-edge debounce window much
+  // tighter so accidental tab closes lose at most ~200ms of changes
+  // instead of nearly a second. Combined with the beforeunload flush
+  // below and the immediate-on-delete path, deletions are robust.
   const schedulePushToServer = debounce(() => {
     pushToServer().catch((error) => {
       console.error('同步用户数据到服务器失败:', error)
     })
-  }, 1000)
+  }, 200)
 
   async function pullFromServer(force = false): Promise<void> {
     const authStore = useAuthStore()
@@ -198,6 +225,32 @@ export const useUserSyncStore = defineStore('userSync', () => {
       const serverData = await fetchUserData()
       const currentUser = authStore.user.username
       const localUser = getLocalUserMarker()
+
+      // v2.0.24: if local has un-synced changes that are newer than the
+      // server's last write (because a previous push got dropped — closed
+      // tab, network hiccup, race), treat local as authoritative for this
+      // round. Push the local snapshot up to server, skip merge. This
+      // catches the "removed favorite resurrects on next browser open"
+      // scenario: localUpdatedAt was set by collectLocalUserData() at the
+      // moment of removal, but `saveUserData` never landed; on next pull
+      // the server-canonical merge would re-introduce the deleted entry,
+      // unless we detect this and push our newer local view first.
+      const localUpdatedAt = localUser === currentUser ? getLocalUpdatedAt() : null
+      const serverUpdatedAt = serverData.updatedAt
+      if (
+        localUpdatedAt &&
+        serverUpdatedAt &&
+        new Date(localUpdatedAt).getTime() > new Date(serverUpdatedAt).getTime()
+      ) {
+        console.info(
+          `[sync] local newer than server (${localUpdatedAt} > ${serverUpdatedAt}) — pushing local instead of merging`
+        )
+        await pushToServer()
+        syncedForUser.value = currentUser
+        setLocalUserMarker(currentUser)
+        return
+      }
+
       const localData = localUser === currentUser
         ? collectLocalUserData()
         : { ...EMPTY_USER_DATA }
@@ -205,12 +258,44 @@ export const useUserSyncStore = defineStore('userSync', () => {
 
       applyUserData(merged)
       await saveUserData(merged)
+      pendingPushPayload = null
       syncedForUser.value = currentUser
       setLocalUserMarker(currentUser)
     } catch (error) {
       console.error('从服务器加载用户数据失败:', error)
     } finally {
       syncing.value = false
+    }
+  }
+
+  // v2.0.24: flush any pending debounced push when the tab closes. We
+  // use `fetch(..., { keepalive: true })` rather than navigator.sendBeacon
+  // because (a) our server's /api/user/data only accepts PUT, and
+  // sendBeacon is POST-only; (b) keepalive is the modern recommendation
+  // and supports any method, with a 64 KB body cap that's well above our
+  // typical user-data payload.
+  function flushPendingPush() {
+    if (!pendingPushPayload) return
+    const authStore = useAuthStore()
+    if (!authStore.user) {
+      pendingPushPayload = null
+      return
+    }
+    try {
+      fetch('/api/user/data', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        keepalive: true,
+        body: JSON.stringify(pendingPushPayload)
+      })
+        .catch((err) => {
+          console.warn('[sync] beforeunload flush rejected:', err)
+        })
+    } catch (err) {
+      console.warn('[sync] beforeunload flush threw:', err)
+    } finally {
+      pendingPushPayload = null
     }
   }
 
@@ -224,6 +309,8 @@ export const useUserSyncStore = defineStore('userSync', () => {
     localStorage.removeItem('radio-history')
     localStorage.removeItem('radio-search-history')
     setLocalUserMarker(null)
+    setLocalUpdatedAt(null)
+    pendingPushPayload = null
   }
 
   function resetSyncState() {
@@ -235,7 +322,26 @@ export const useUserSyncStore = defineStore('userSync', () => {
     resetSyncState()
   }
 
-  registerUserDataPushHandler(schedulePushToServer)
+  // v2.0.24: register both the debounced and immediate-fire handlers.
+  // Immediate is wired up to a fire-and-forget pushToServer for use by
+  // destructive operations (removeFavorite / clearFavorites — see
+  // player.ts) where a debounce window risks losing the deletion.
+  registerUserDataPushHandler(
+    schedulePushToServer,
+    () => {
+      pushToServer().catch((error) => {
+        console.error('立即同步用户数据失败:', error)
+      })
+    }
+  )
+
+  // v2.0.24: install the beforeunload flush exactly once per page load.
+  // pagehide is the iOS Safari-friendly alternative; we register both.
+  if (typeof window !== 'undefined') {
+    const flush = () => flushPendingPush()
+    window.addEventListener('beforeunload', flush)
+    window.addEventListener('pagehide', flush)
+  }
 
   return {
     syncedForUser,
