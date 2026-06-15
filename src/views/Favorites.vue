@@ -113,51 +113,57 @@
         </button>
       </div>
 
-      <!-- 列表视图 — 左侧拖动柄 -->
+      <!--
+        v2.0.25: long-press anywhere on the card to drag. No more
+        dedicated handle. Touch-only delay is OFF so mouse drag also
+        works (helps QA in emulator / desktop). force-fallback flips
+        SortableJS off the HTML5 native Drag-and-Drop API and onto its
+        own pointer-event implementation, which is the only one that
+        works reliably inside Android WebView / Chromium on MIUI.
+        filter=".no-drag-trigger" excludes the play / favorite / share
+        buttons inside each card so tapping them still fires their own
+        click handler instead of starting a drag.
+      -->
       <VueDraggable
         v-if="viewMode === 'list'"
         v-model="draggableModel"
         :animation="200"
-        handle=".drag-handle"
-        :delay="0"
-        ghost-class="opacity-50"
-        chosen-class="ring-2 ring-ios-blue"
+        :delay="500"
+        :delay-on-touch-only="false"
+        :touch-start-threshold="5"
+        :force-fallback="true"
+        :fallback-tolerance="3"
+        :prevent-on-filter="false"
+        filter=".no-drag-trigger,button"
+        ghost-class="dragging-ghost"
+        chosen-class="dragging-chosen"
         class="space-y-3"
         @end="onReorderEnd"
       >
-        <div
+        <StationCard
           v-for="station in draggableModel"
           :key="'list-' + station.stationuuid"
-          class="flex items-stretch gap-2"
-        >
-          <button
-            type="button"
-            class="drag-handle flex-shrink-0 flex items-center justify-center w-8 rounded-ios bg-gray-100 dark:bg-dark-gray text-ios-gray dark:text-dark-secondary cursor-grab active:cursor-grabbing select-none touch-none"
-            :aria-label="t('favorites.reorderHint')"
-          >
-            <Bars3Icon class="w-5 h-5 pointer-events-none" />
-          </button>
-          <div class="flex-1 min-w-0">
-            <StationCard
-              :station="convertToRadioStation(station)"
-              @play="playStation"
-              @favorite="removeFavorite"
-              @share="showShareModal"
-            />
-          </div>
-        </div>
+          :station="convertToRadioStation(station)"
+          @play="playStation"
+          @favorite="removeFavorite"
+          @share="showShareModal"
+        />
       </VueDraggable>
 
-      <!-- 网格视图 — 长按拖动 -->
+      <!-- 网格视图 — 长按拖动；同样设置 -->
       <VueDraggable
         v-else
         v-model="draggableModel"
         :animation="200"
-        :delay="200"
-        :delay-on-touch-only="true"
+        :delay="500"
+        :delay-on-touch-only="false"
         :touch-start-threshold="5"
-        ghost-class="opacity-50"
-        chosen-class="ring-2 ring-ios-blue"
+        :force-fallback="true"
+        :fallback-tolerance="3"
+        :prevent-on-filter="false"
+        filter=".no-drag-trigger,button"
+        ghost-class="dragging-ghost"
+        chosen-class="dragging-chosen"
         class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4"
         @end="onReorderEnd"
       >
@@ -286,7 +292,9 @@ const onReorderEnd = () => {
 // One-time hint banner. Persisted to localStorage so we don't pester the
 // user every time they open the page. Shown only when there are >=2
 // favorites (otherwise drag is meaningless).
-const REORDER_HINT_KEY = 'favorites-reorder-hint-seen-v222'
+// v2.0.25: bump key so users who saw the old "use the handle on the left"
+// hint see the new "long-press anywhere to drag" hint exactly once.
+const REORDER_HINT_KEY = 'favorites-reorder-hint-seen-v225'
 const reorderHintSeen = ref<boolean>(false)
 onMounted(() => {
   try {
@@ -369,3 +377,37 @@ const convertToRadioStation = (favorite: FavoriteStation): RadioStation => {
   }
 }
 </script>
+
+<style scoped>
+/*
+  v2.0.25: drag-and-drop visuals for SortableJS forceFallback mode.
+
+  - touch-action:none on the draggable items so the WebView doesn't
+    interpret the long-press as a text-selection / scroll gesture and
+    cancel the pointermove stream Sortable needs.
+  - user-select:none so text inside the card doesn't get selected during
+    the 500ms long-press wait.
+  - We scope to direct children of the draggable lists so the rest of
+    the page (sticky header, hint banner, dialogs) keeps normal touch
+    behavior.
+*/
+.favorites-page :deep(.sortable-drag),
+.favorites-page :deep(.sortable-ghost),
+.favorites-page :deep(.sortable-fallback) {
+  touch-action: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.favorites-page :deep(.dragging-ghost) {
+  opacity: 0.35;
+}
+
+.favorites-page :deep(.dragging-chosen) {
+  /* Subtle ring + lift; .ios-card already has rounded corners and shadow */
+  outline: 2px solid #007AFF;
+  outline-offset: -2px;
+  box-shadow: 0 8px 20px rgba(0, 122, 255, 0.25);
+  transition: box-shadow 120ms ease-out;
+}
+</style>

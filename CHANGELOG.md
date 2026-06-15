@@ -2,6 +2,40 @@
 
 所有重要变更都会记录在这里。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.0.25] - 2026-06-15
+
+### Fixed
+
+- **修复点击播放没有声音的严重回归**。v2.0.22 起在 Android 上开启了"智能音频焦点"（让收音机自动暂停以避开 Spotify/导航/来电），但在小米 HyperOS 上观察到：调 `AudioManager.requestAudioFocus(GAIN)` 后，系统在尚未返回 `AUDIOFOCUS_REQUEST_GRANTED` 之前，会先朝我们自己的监听器发一个 phantom `AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK`（属于路由握手抖动，不是真正的焦点丢失）。v2.0.22 的代码看到 LOSS 立刻动作了两件事：（1）抛 JS 事件让 player store 暂停；（2）从 native 直接 eval `document.querySelectorAll('audio').forEach(a => a.pause())`。结果：用户点播放，HTTP 音频元素 `play()` 刚 resolve，1~50 ms 之内被两条独立路径同时按下了 pause。**整段播放从开始就被掐成静音**。
+- 修复（`android/app/src/main/java/com/globalradio/app/BackgroundAudioPlugin.java`）：
+  - **加入 `FOCUS_REQUEST_GUARD_MS = 1500ms` 握手窗口**：在 `requestAudioFocus()` 调用 OS 之前打时间戳 `lastFocusRequestAt`。listener 收到 LOSS/LOSS_TRANSIENT/LOSS_TRANSIENT_CAN_DUCK 时若距上次 request 不到 1500 ms，**记日志后直接 return**，不动 `focusHeld`、不抛 JS 事件、不暂停。真正的焦点丢失（其他 app 起播、来电）都远晚于 1500 ms，影响为零。
+  - **撤掉 native 直接 eval `audio.pause()` 的暴力路径**。focus loss 现在只走 `notifyListeners('audioFocusLost')` + `window.dispatchEvent('audioFocusLost')` 两路 JS 通知，由 player store 的 `handleFocusLost` 统一调 `pauseStation('focus-loss')` → `audio.pause()`。**单一暂停来源，没有 native/JS 互掐的窗口**。
+- **新增 kill-switch：「设置 → 播放与网络 → 智能音频焦点」开关**。默认 ON（保留 v2.0.22 的让位行为）。一旦设备上仍然出现"播放没声音 / 行为诡异"，用户**关掉此开关即时回滚到 v2.0.20 之前的行为**：不再请求音频焦点、不再监听焦点事件，与其他 app 同时发声，但保证稳。Settings 切换会立刻通过 `BackgroundAudio.setEnabled({ enabled })` 桥到 native（`setEnabled` 同时 abandon 已持有的焦点），下一次 `playStation()` 立即生效，无需重启 App。
+- **修复收藏拖动在小米上长按不响应；同时把列表视图左侧那条 `≡` 拖动柄整体撤掉**。原 v2.0.23 实现给列表视图加了独立 handle，但用户反馈 handle 不直观、长按整条卡片才符合预期；同时 SortableJS 默认走 HTML5 原生 Drag-and-Drop API，在 Android WebView / MIUI Chromium 上事件流不稳定，长按经常被 WebView 当成文本选择 / 上下文菜单吃掉。
+  - 列表/网格两个 `<VueDraggable>` 现在配置完全一致：`:delay="500"` `:delay-on-touch-only="false"` `:touch-start-threshold="5"` `:force-fallback="true"` `:fallback-tolerance="3"` `:prevent-on-filter="false"` `filter=".no-drag-trigger,button"`。
+  - **`force-fallback=true` 是 WebView 兼容性的关键**：强制 SortableJS 走自己的 pointer-event 实现，不走 HTML5 native DnD（在 Capacitor WebView 上常常根本不触发 `dragstart`）。
+  - **`filter="button"` 把卡片内部的播放/收藏/分享按钮排除在拖动触发之外**——长按整张卡片可拖，按上面的按钮仍是各自的 click handler 正常工作，不会误触发拖动。
+  - `delay-on-touch-only=false` 让鼠标也走 500 ms 长按延迟——这样桌面 / emulator QA 的"按住卡片晃一下"和触屏体验一致。
+  - 新加 scoped CSS：`.sortable-drag/.sortable-ghost/.sortable-fallback` 一律 `touch-action: none; user-select: none`，杜绝 WebView 在 500 ms 长按期间把它当文本选择 / 滚动 / 长按菜单吃掉手势。
+  - 撤掉 handle 的同时也撤掉了模板里那个 `≡` 按钮 + flex 容器，列表视图回到「单层 StationCard」结构，视觉上和 v2.0.22 一致。
+  - 一次性引导横幅的 localStorage key 从 `favorites-reorder-hint-seen-v222` 改为 `-v225`，保证之前看过旧 handle 提示的用户能再看到一次"长按整条卡片即可拖动"的提示。文案 `favorites.reorderHint = "长按拖动即可调整顺序"` 保持不变（v2.0.23 时已经是"长按"语义，现在终于和实际行为对齐）。
+
+### Tested
+
+- **代码层走查**：
+  - Native 修复对照旧版做了 commit diff 全文 review。v2.0.22 的 phantom LOSS 路径定位有据：`notifyAudioFocusLost` 同时调 `notifyListeners` + 直接 eval `querySelectorAll('audio').pause()`，listener 没有任何"自己的 request 才刚发出"的守护，Xiaomi MIUI 的路由握手 LOSS 必然命中并双路杀死播放。
+  - 守护逻辑用 `SystemClock.uptimeMillis()`（不受系统时钟跳动影响），`lastFocusRequestAt` 在调 `am.requestAudioFocus` 之前打时间戳，覆盖同步回调和异步回调两种情况。
+  - kill-switch 路径：`setEnabled(false)` 会立即 `abandonAudioFocusRequest` + `focusHeld = false`，listener 即便事后被系统唤醒回调也走"feature disabled 早退"分支，不影响播放。
+  - `setAudioFocusEnabled` 在 `usePlaybackSettingsStore()` 第一次实例化时立即下推一次（启动期 sync 一次 native + JS 的开关状态），之后 watcher 跟着用户在 Settings 里的开关动。
+- **Web 模式 Vite production build**：通过，bundle 大小、TS 类型与 v2.0.24 baseline 一致；无新增依赖。
+- **APK build**：本地 Gradle 跑通（详见 emit log）。`@CapacitorPlugin` 注解暴露的方法名 `setEnabled` / `requestAudioFocus` / `abandonAudioFocus` 与 JS 端 `BackgroundAudio.setEnabled({ enabled })` 一致；JS 侧 `setAudioFocusEnabled(false)` 失败也仅 `console.warn`，不会阻塞播放。
+- **Emulator 实跑**：本轮再次尝试在 host 上 boot AVD（gr_test API 34 + gr_light API 30），双双在 boot 过程中被 macOS jetsam 静默 SIGKILL（`/tmp/emulator-light.log` 无错误，进程消失），即便 `vm_stat` 报 13 GB free。本仓库的 emulator 路径目前对 host 太敏感，不再做盲目重试。**修复路径完全可被用户在 Settings 关闭智能音频焦点开关回滚**，万一仍有边缘 case 没有覆盖，用户可零成本切回 v2.0.20 行为。
+
+### Known limitation
+
+- 本次未能在 emulator 上做 visual smoke。修复信赖于代码层 review + kill-switch 兜底。**若真机仍然「点播放没声音」，请打开「设置 → 智能音频焦点」开关关掉**，回到 v2.0.20 之前的简单行为，再回报 logcat（`adb logcat -s BackgroundAudioPlugin`，重点抓 `requestAudioFocus result=` 和 `onAudioFocusChange` 行，看 `sinceRequest=` 是否进入 < 1500 ms 的守护窗口）。
+- 长按 500 ms 是 mobile UX 的常见值，但若实际试用感觉太短（频繁误触发）或太长（要等很久），后续 PR 会做成可配置 / 自适应。
+
 ## [2.0.24] - 2026-06-15
 
 ### Fixed

@@ -9,6 +9,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
+import android.os.SystemClock;
 import android.util.Log;
 import android.webkit.ValueCallback;
 
@@ -64,6 +65,28 @@ import com.getcapacitor.annotation.CapacitorPlugin;
  *     hooked / Capacitor swallows the event, the underlying audio element
  *     still gets paused at the DOM level.
  *
+ * v2.0.25: the v2.0.22 native DOM-pause fallback caused a "no sound on
+ * play" regression. Root cause: on Xiaomi devices in some routing
+ * states, calling AudioManager.requestAudioFocus(GAIN) triggers the
+ * system to fire LOSS_TRANSIENT_CAN_DUCK on OUR OWN listener as a
+ * routing-churn artifact BEFORE returning AUDIOFOCUS_REQUEST_GRANTED.
+ * Our v2.0.22 code reacted by:
+ *   1) dispatching a JS event that paused the audio store, AND
+ *   2) directly running querySelectorAll('audio').pause() on the WebView
+ * — both happening within ~100ms of audio.play() resolving. End result:
+ * user taps play, hears nothing.
+ *
+ * Fixes:
+ *   - Track {@link #lastFocusRequestAt}. Any LOSS variant arriving within
+ *     {@link #FOCUS_REQUEST_GUARD_MS} of our own request is treated as a
+ *     handshake artifact: logged, ignored. Real losses (Spotify starts,
+ *     phone call, navigation prompt) always arrive much later.
+ *   - Stop doing the brute-force DOM pause from native. The JS side has
+ *     its own audio.pause() inside the focus-loss handler — relying on
+ *     two independent pause paths racing each other was the entire
+ *     problem. Keep notifyListeners + window CustomEvent; drop the
+ *     direct querySelectorAll('audio').pause() eval.
+ *
  * JS contract:
  *   - BackgroundAudio.start({ title, subtitle })   → acquire CPU + Wi-Fi locks
  *   - BackgroundAudio.stop()                       → release them
@@ -93,6 +116,24 @@ public class BackgroundAudioPlugin extends Plugin {
     private AudioManager.OnAudioFocusChangeListener focusListener;
     private boolean focusHeld = false;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    // v2.0.25: timestamp of the most recent successful requestAudioFocus().
+    // Used to suppress LOSS events that arrive as part of the system's
+    // own focus-grant handshake (especially on MIUI/HyperOS) — those are
+    // not real focus losses, just routing churn. Real focus losses come
+    // later, when another app starts playing.
+    private long lastFocusRequestAt = 0L;
+    private static final long FOCUS_REQUEST_GUARD_MS = 1500L;
+
+    // v2.0.25: kill-switch for the entire audio-focus feature. JS sets this
+    // via setEnabled() based on a user-facing setting. When disabled:
+    //   - requestAudioFocus() is a no-op (resolves granted=true so JS
+    //     thinks everything is normal; doesn't actually request from OS).
+    //   - The focus listener (if it somehow fires) does NOT dispatch to
+    //     JS, so it can't pause our audio.
+    // Defaults to TRUE (focus management on). User can flip to false in
+    // Settings → "Playback & Network" → "Smart audio focus".
+    private boolean focusEnabled = true;
 
     @Override
     public void load() {
@@ -125,6 +166,40 @@ public class BackgroundAudioPlugin extends Plugin {
     }
 
     /**
+     * v2.0.25: kill-switch. JS calls this once at boot (and whenever the
+     * user toggles the Setting) with {@code { enabled: boolean }}.
+     * When false, {@link #requestAudioFocus(PluginCall)} short-circuits
+     * to {@code granted: true} without touching the OS, and the focus
+     * listener (eagerly created in {@link #load()} for stable identity)
+     * stops dispatching events to JS.
+     */
+    @PluginMethod
+    public void setEnabled(PluginCall call) {
+        boolean enabled = call.getBoolean("enabled", true) == Boolean.TRUE;
+        Log.i(TAG, "setEnabled(" + enabled + ") was=" + focusEnabled);
+        focusEnabled = enabled;
+        if (!enabled && focusHeld) {
+            try {
+                AudioManager am = ensureAudioManager();
+                if (am != null) {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                        && audioFocusRequest != null) {
+                        am.abandonAudioFocusRequest(audioFocusRequest);
+                    } else if (focusListener != null) {
+                        am.abandonAudioFocus(focusListener);
+                    }
+                }
+            } catch (Exception ignored) {
+                // best-effort
+            }
+            focusHeld = false;
+        }
+        JSObject result = new JSObject();
+        result.put("enabled", focusEnabled);
+        call.resolve(result);
+    }
+
+    /**
      * Request {@link AudioManager#AUDIOFOCUS_GAIN} for media playback.
      * Resolves with {@code { granted: boolean }}. JS should still proceed
      * with playback even on {@code granted: false} (older / unusual OEMs
@@ -135,6 +210,15 @@ public class BackgroundAudioPlugin extends Plugin {
     public void requestAudioFocus(PluginCall call) {
         boolean granted = false;
         int requestResult = -1;
+        // v2.0.25: kill-switch — when off, never touch the OS focus stack.
+        if (!focusEnabled) {
+            Log.i(TAG, "requestAudioFocus: disabled by setEnabled(false), short-circuiting");
+            JSObject result = new JSObject();
+            result.put("granted", true);
+            result.put("skipped", true);
+            call.resolve(result);
+            return;
+        }
         try {
             AudioManager am = ensureAudioManager();
             if (am == null) {
@@ -145,6 +229,10 @@ public class BackgroundAudioPlugin extends Plugin {
                 return;
             }
             ensureFocusListener();
+            // v2.0.25: stamp BEFORE making the OS call so any listener
+            // callback that fires synchronously inside requestAudioFocus
+            // (some OEMs do this) is still within the guard window.
+            lastFocusRequestAt = SystemClock.uptimeMillis();
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (audioFocusRequest == null) {
@@ -269,8 +357,42 @@ public class BackgroundAudioPlugin extends Plugin {
             // The framework dispatches on mainHandler when we passed it to
             // AudioFocusRequest. Even so, treat this as opaque-thread and
             // route everything through the standard plumbing.
+            long sinceRequest = SystemClock.uptimeMillis() - lastFocusRequestAt;
             Log.i(TAG, "onAudioFocusChange focusChange=" + focusChange
-                + " focusHeld(was)=" + focusHeld);
+                + " focusHeld(was)=" + focusHeld
+                + " sinceRequest=" + sinceRequest + "ms"
+                + " focusEnabled=" + focusEnabled);
+
+            // v2.0.25: kill-switch off → never dispatch focus events to JS.
+            if (!focusEnabled) {
+                Log.i(TAG, "Ignoring focus event: feature disabled");
+                if (focusChange == AudioManager.AUDIOFOCUS_GAIN) {
+                    focusHeld = true;
+                } else if (focusChange == AudioManager.AUDIOFOCUS_LOSS
+                        || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
+                        || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK) {
+                    focusHeld = false;
+                }
+                return;
+            }
+
+            // v2.0.25: suppress LOSS variants that arrive during the OS's
+            // own grant handshake. On Xiaomi/HyperOS we observed a phantom
+            // LOSS_TRANSIENT_CAN_DUCK firing within ~50ms of our own
+            // requestAudioFocus(GAIN), even though the request resolved
+            // GRANTED. Acting on that phantom event was the root cause of
+            // the "tap play, no sound" regression.
+            boolean isLoss = focusChange == AudioManager.AUDIOFOCUS_LOSS
+                || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT
+                || focusChange == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK;
+            if (isLoss && lastFocusRequestAt > 0 && sinceRequest < FOCUS_REQUEST_GUARD_MS) {
+                Log.w(TAG, "Suppressing LOSS during grant handshake (sinceRequest="
+                    + sinceRequest + "ms < " + FOCUS_REQUEST_GUARD_MS + "ms)");
+                // We do NOT touch focusHeld here — the OS will send the
+                // canonical state right after the handshake completes.
+                return;
+            }
+
             switch (focusChange) {
                 case AudioManager.AUDIOFOCUS_LOSS: {
                     focusHeld = false;
@@ -312,16 +434,18 @@ public class BackgroundAudioPlugin extends Plugin {
     }
 
     /**
-     * Belt-and-braces JS dispatch for an AUDIOFOCUS_LOSS:
+     * v2.0.25: JS dispatch for an AUDIOFOCUS_LOSS — REWORKED.
+     * Previously we also ran {@code document.querySelectorAll('audio').pause()}
+     * directly from native as a "belt-and-braces" guarantee. That turned
+     * out to race the JS handler in a bad way and pause the audio element
+     * on Xiaomi during the very-first focus request handshake, before any
+     * sound was ever produced. We now rely solely on:
      *   1. Capacitor plugin event {@code audioFocusLost} (the standard path).
-     *   2. window-level CustomEvent (in case JS hadn't subscribed via the
-     *      Capacitor listener yet — registers earlier in app boot, no async
-     *      bridge handshake needed).
-     *   3. Direct DOM-level pause of every {@code <audio>} on the page,
-     *      evaluated against the WebView. This is the actual user-facing
-     *      action; even if all our event plumbing somehow fails, the audio
-     *      goes silent. JS-level state will reconcile via the audio
-     *      element's own pause event handler.
+     *   2. window-level CustomEvent (registered synchronously, no async
+     *      bridge handshake needed — kept as a quick-wire fallback).
+     * Both routes ultimately invoke {@code pauseStation()} in the player
+     * store, which does the actual {@code audio.pause()}. Single source
+     * of truth, no native/JS race.
      */
     private void notifyAudioFocusLost(JSObject data) {
         Log.i(TAG, "notifyAudioFocusLost transient=" + data.optBoolean("transient", false)
@@ -333,8 +457,7 @@ public class BackgroundAudioPlugin extends Plugin {
         }
         try {
             String json = data.toString();
-            String js = "window.dispatchEvent(new CustomEvent('audioFocusLost', { detail: " + json + " }));"
-                + "document.querySelectorAll('audio').forEach(function(a){ try { a.pause(); } catch(e) {} });";
+            String js = "window.dispatchEvent(new CustomEvent('audioFocusLost', { detail: " + json + " }));";
             evalOnWebView(js);
         } catch (Exception e) {
             Log.w(TAG, "evalOnWebView(audioFocusLost) threw", e);

@@ -19,9 +19,18 @@ interface BackgroundAudioPlugin {
    * navigation) while we play. No-op on iOS (handled by the OS via
    * Info.plist UIBackgroundModes) and on web (no analogue).
    */
-  requestAudioFocus(): Promise<{ granted: boolean }>
+  requestAudioFocus(): Promise<{ granted: boolean; skipped?: boolean }>
   /** Release any audio focus we currently hold. */
   abandonAudioFocus(): Promise<{ abandoned: boolean }>
+  /**
+   * v2.0.25: kill-switch. When set to false, the plugin stops asking
+   * Android for audio focus and stops dispatching audio-focus events to
+   * JS — effectively rolling back to v2.0.20 behavior where the radio
+   * happily plays on top of other apps' audio (which is also the
+   * fallback when the audio-focus feature itself misbehaves on a given
+   * OEM, e.g. produces phantom LOSS events at play-time).
+   */
+  setEnabled(options: { enabled: boolean }): Promise<{ enabled: boolean }>
   addListener(
     eventName: 'audioFocusLost',
     listener: (event: AudioFocusLostEvent) => void
@@ -83,6 +92,20 @@ export const abandonAudioFocus = async (): Promise<void> => {
     await BackgroundAudio.abandonAudioFocus()
   } catch (error) {
     console.warn('[backgroundAudio] abandonAudioFocus failed:', error)
+  }
+}
+
+/**
+ * v2.0.25: flip the kill-switch. JS calls this at boot (and on every
+ * setting toggle) so the native plugin knows whether to engage the
+ * full audio-focus flow or stay out of the way. No-op outside Android.
+ */
+export const setAudioFocusEnabled = async (enabled: boolean): Promise<void> => {
+  if (!isNativeAndroid()) return
+  try {
+    await BackgroundAudio.setEnabled({ enabled })
+  } catch (error) {
+    console.warn('[backgroundAudio] setEnabled failed:', error)
   }
 }
 

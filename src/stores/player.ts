@@ -24,6 +24,7 @@ import {
   abandonAudioFocus,
   addAudioFocusListeners
 } from '@/utils/backgroundAudio'
+import { usePlaybackSettingsStore } from '@/stores/playbackSettings'
 
 export const usePlayerStore = defineStore('player', () => {
   // 状态
@@ -761,13 +762,24 @@ export const usePlayerStore = defineStore('player', () => {
       await announceNativeMetadata(station)
       await announceNativePlaybackState('playing')
       await startBackgroundAudio(station)
-      // Ask Android for audio focus so Spotify / phone calls / nav prompts
-      // get exclusive use of the speaker (and we get told to pause via the
-      // listener registered below). granted=false on weird OEMs is logged
-      // and we proceed anyway — denying focus doesn't mean denying audio.
-      const granted = await requestAudioFocus()
-      if (!granted) {
-        console.warn('[playback] audio focus not granted; other apps may mix on top')
+      // v2.0.25: belt-and-braces kill-switch — never even ASK for focus
+      // if the user disabled smart audio focus in settings. This is in
+      // addition to the native side's setEnabled(false) short-circuit,
+      // covering the brief window between app start and the first
+      // playbackSettings store instantiation pushing setEnabled() to
+      // native. Same idea on resume.
+      const playbackSettings = usePlaybackSettingsStore()
+      if (playbackSettings.smartAudioFocus) {
+        // Ask Android for audio focus so Spotify / phone calls / nav prompts
+        // get exclusive use of the speaker (and we get told to pause via the
+        // listener registered below). granted=false on weird OEMs is logged
+        // and we proceed anyway — denying focus doesn't mean denying audio.
+        const granted = await requestAudioFocus()
+        if (!granted) {
+          console.warn('[playback] audio focus not granted; other apps may mix on top')
+        }
+      } else {
+        console.info('[playback] smart audio focus disabled by user; skipping requestAudioFocus')
       }
 
       // 只在「直连」分支挂自动回退；走代理的（HLS / mixed-content / 用户强制
@@ -826,12 +838,16 @@ export const usePlayerStore = defineStore('player', () => {
         mediaSessionManager.updatePlaybackState(true)
         await announceNativePlaybackState('playing')
         await startBackgroundAudio(currentStation.value)
-        // Re-acquire focus on every resume so the OS knows we're back in
-        // the audio mix; without this Android may still consider us
-        // background-paused and route media keys elsewhere.
-        const granted = await requestAudioFocus()
-        if (!granted) {
-          console.warn('[playback] audio focus not granted on resume')
+        // v2.0.25: same kill-switch gate as in playStation(); see above.
+        const playbackSettings = usePlaybackSettingsStore()
+        if (playbackSettings.smartAudioFocus) {
+          // Re-acquire focus on every resume so the OS knows we're back in
+          // the audio mix; without this Android may still consider us
+          // background-paused and route media keys elsewhere.
+          const granted = await requestAudioFocus()
+          if (!granted) {
+            console.warn('[playback] audio focus not granted on resume')
+          }
         }
       } catch (err) {
         console.error('恢复播放失败')

@@ -240,6 +240,30 @@
               />
             </button>
           </div>
+
+          <!-- v2.0.25: kill-switch for the Android audio-focus feature. -->
+          <div class="flex items-start justify-between gap-4">
+            <div class="flex-1">
+              <p class="text-sm font-medium text-ios-dark-gray dark:text-dark-text">{{ t('settings.smartAudioFocus') }}</p>
+              <p class="text-xs text-ios-gray dark:text-dark-secondary mt-1">{{ t('settings.smartAudioFocusHint') }}</p>
+            </div>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="playbackSettingsStore.smartAudioFocus ? 'true' : 'false'"
+              @click="playbackSettingsStore.toggleSmartAudioFocus()"
+              :style="{
+                backgroundColor: playbackSettingsStore.smartAudioFocus ? '#007AFF' : '#C7C7CC'
+              }"
+              class="relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors focus:outline-none"
+            >
+              <span class="sr-only">{{ playbackSettingsStore.smartAudioFocus ? t('settings.enabled') : t('settings.disabled') }}</span>
+              <span
+                class="inline-block h-6 w-6 transform rounded-full bg-white shadow transition-transform"
+                :class="playbackSettingsStore.smartAudioFocus ? 'translate-x-5' : 'translate-x-0.5'"
+              />
+            </button>
+          </div>
         </div>
       </section>
 

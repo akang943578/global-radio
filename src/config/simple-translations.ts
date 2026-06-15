@@ -183,6 +183,8 @@ export const createSimpleTranslations = (): Record<SupportedLanguage, any> => {
       failoverTimeoutUnit: 's',
       forceProxy: 'Always use proxy',
       forceProxyHint: 'Route every station through the server proxy (uses more bandwidth, can bypass network issues).',
+      smartAudioFocus: 'Smart audio focus',
+      smartAudioFocusHint: 'Pause this app when another app (Spotify, calls, navigation) needs to play. Turn OFF if playback unexpectedly produces no sound on your device.',
       enabled: 'On',
       disabled: 'Off'
     },
@@ -422,6 +424,8 @@ export const createSimpleTranslations = (): Record<SupportedLanguage, any> => {
         failoverTimeoutUnit: '秒',
         forceProxy: '始终使用代理',
         forceProxyHint: '所有电台都走服务器代理（耗带宽，但能绕过部分网络问题）',
+        smartAudioFocus: '智能音频焦点',
+        smartAudioFocusHint: '当其他应用（Spotify、来电、导航）需要发声时自动暂停本应用。如果你在某些设备上点击播放完全没声音，请关闭此项。',
         enabled: '开启',
         disabled: '关闭'
       },
