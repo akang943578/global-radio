@@ -70,6 +70,19 @@ export const usePlayerStore = defineStore('player', () => {
   // and stay paused, the user has to come back and press play.
   const pausedByFocusLoss = ref(false)
 
+  // v2.0.22: timestamp of the most recent OS-driven pause hint (focus loss
+  // from native plugin OR a `pause` event on the audio element that fired
+  // *without* user/store action). The audio element's `pause` listener
+  // uses this to decide whether to attempt auto-resume — see initAudio().
+  // The bug fixed by this: when another app grabs focus, Chromium's
+  // internal media handling pauses our `<audio>` element directly. The
+  // existing 500ms auto-resume thought "playbackIntent is still 'playing',
+  // resume me!" and yanked the audio back, fighting the focus owner. Net
+  // effect: both apps audible. We now suppress auto-resume for 5s after
+  // any focus-loss signal.
+  let lastExternalPauseHintAt = 0
+  const EXTERNAL_PAUSE_GUARD_MS = 5000
+
   const noteRecoveryAttempt = () => {
     pauseRecoveryAttempts++
     if (pauseRecoveryResetTimer) clearTimeout(pauseRecoveryResetTimer)
@@ -571,6 +584,22 @@ export const usePlayerStore = defineStore('player', () => {
       audio.value.addEventListener('pause', () => {
         isPlaying.value = false
 
+        // v2.0.22: only attempt the screen-off-self-heal resume if there
+        // hasn't been a recent focus-loss hint. Without this guard, when
+        // another media app grabs focus the WebView/Chromium pauses our
+        // <audio>, and our 500ms auto-resume would fight it — the radio
+        // would just unpause itself and play simultaneously with the
+        // other app. The `lastExternalPauseHintAt` timestamp is updated
+        // by the audio-focus listener (and could be extended to other
+        // OS-pause causes in the future).
+        const sinceExternalPause = Date.now() - lastExternalPauseHintAt
+        if (sinceExternalPause < EXTERNAL_PAUSE_GUARD_MS) {
+          console.info(
+            `[player] pause event suppressed auto-resume (focus-loss ${sinceExternalPause}ms ago)`
+          )
+          return
+        }
+
         // Self-heal: if the user wants playback but the WebView quietly
         // paused us (typical Android pattern when the screen turns off
         // and the OS briefly suspends the media element before our
@@ -589,7 +618,8 @@ export const usePlayerStore = defineStore('player', () => {
             if (
               playbackIntent.value === 'playing' &&
               target === audio.value &&
-              target.paused
+              target.paused &&
+              Date.now() - lastExternalPauseHintAt >= EXTERNAL_PAUSE_GUARD_MS
             ) {
               target.play().catch((err) => {
                 console.warn('[playback] auto-resume failed:', err)
@@ -1001,30 +1031,82 @@ export const usePlayerStore = defineStore('player', () => {
   //   - permanent loss → pause and stay paused (Spotify/podcast etc.)
   //   - transient loss → pause; resume on the next gain (call/nav prompt)
   // No-op on web/iOS (the helper returns immediately on non-Android).
-  void addAudioFocusListeners({
-    onLost: (event) => {
-      if (playbackIntent.value !== 'playing' || !audio.value) {
-        // We weren't playing anyway — nothing to do.
-        return
-      }
-      pausedByFocusLoss.value = !!event.transient
+  // v2.0.22: dedupe LOST events from both the Capacitor plugin channel
+  // AND the window-level CustomEvent (native plugin fires both). Within a
+  // short window, treat a second event as a duplicate.
+  let lastFocusEventAt = 0
+  let lastFocusEventName: 'lost' | 'gained' | null = null
+  const FOCUS_DEDUP_MS = 200
+
+  const handleFocusLost = (event: { transient: boolean; canDuck: boolean }) => {
+    const now = Date.now()
+    if (lastFocusEventName === 'lost' && now - lastFocusEventAt < FOCUS_DEDUP_MS) {
+      return
+    }
+    lastFocusEventAt = now
+    lastFocusEventName = 'lost'
+
+    // Mark recent OS-pause so the audio element's own `pause` event
+    // handler doesn't try to auto-resume us into a fight with the new
+    // focus owner. Independent of whether we were technically "playing"
+    // in our store — the native side may know better.
+    lastExternalPauseHintAt = now
+
+    console.info(
+      `[player] audio focus lost (transient=${event.transient}, canDuck=${event.canDuck})`
+    )
+
+    if (!audio.value) return
+    pausedByFocusLoss.value = !!event.transient
+
+    // Hard pause — defensively even if our state thinks we're already
+    // paused, because the WebView audio element may still be playing
+    // (especially if we got here via the window-event fallback and the
+    // store-level pause hasn't run yet).
+    try {
+      audio.value.pause()
+    } catch (err) {
+      console.warn('[player] audio.pause() in focus-loss threw:', err)
+    }
+
+    if (playbackIntent.value === 'playing') {
       // We pass cause: 'focus-loss' so pauseStation does NOT clobber the
       // pausedByFocusLoss flag we just set. If the loss is non-transient
       // we leave pausedByFocusLoss=false and the user must press play.
       void pauseStation('focus-loss')
-    },
-    onGained: () => {
-      // Only auto-resume if the OS-driven transient pause is still pending
-      // and the user hasn't moved on to a different station / pressed stop.
-      if (
-        pausedByFocusLoss.value &&
-        currentStation.value &&
-        playbackIntent.value === 'paused'
-      ) {
-        pausedByFocusLoss.value = false
-        void resumeStation()
-      }
+    } else {
+      // Already paused at the store level; just keep media-session in sync.
+      void announceNativePlaybackState('paused')
     }
+  }
+
+  const handleFocusGained = () => {
+    const now = Date.now()
+    if (lastFocusEventName === 'gained' && now - lastFocusEventAt < FOCUS_DEDUP_MS) {
+      return
+    }
+    lastFocusEventAt = now
+    lastFocusEventName = 'gained'
+
+    console.info(
+      `[player] audio focus gained (pausedByFocusLoss=${pausedByFocusLoss.value})`
+    )
+
+    // Only auto-resume if the OS-driven transient pause is still pending
+    // and the user hasn't moved on to a different station / pressed stop.
+    if (
+      pausedByFocusLoss.value &&
+      currentStation.value &&
+      playbackIntent.value === 'paused'
+    ) {
+      pausedByFocusLoss.value = false
+      void resumeStation()
+    }
+  }
+
+  void addAudioFocusListeners({
+    onLost: handleFocusLost,
+    onGained: handleFocusGained
   }).catch((err) => {
     console.warn('[playback] addAudioFocusListeners failed:', err)
   })

@@ -3,4 +3,5 @@
     <string name="app_name">全球电台</string>
     <string name="title_activity_main">全球电台</string>
     <string name="menu_server_settings">服务器设置</string>
+    <string name="playback_channel_name">音乐</string>
 </resources>

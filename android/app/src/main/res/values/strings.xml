@@ -5,4 +5,9 @@
     <string name="package_name">com.globalradio.app</string>
     <string name="custom_url_scheme">com.globalradio.app</string>
     <string name="menu_server_settings">Server Settings</string>
+    <!-- v2.0.22: name shown in Settings → Apps → Notifications → channels.
+         MIUI/HyperOS prefers a media-shaped name (matches their built-in
+         music app's "音乐" / "Music"); the localized form helps the system
+         classify our notification as a media card. -->
+    <string name="playback_channel_name">Music</string>
 </resources>

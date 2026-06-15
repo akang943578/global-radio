@@ -10,6 +10,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
 import android.util.Log;
+import android.webkit.ValueCallback;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -47,6 +48,22 @@ import com.getcapacitor.annotation.CapacitorPlugin;
  * and bridge focus-change events back to JS via {@code notifyListeners}
  * so the player store can pause / auto-resume per Android UX guidelines.
  *
+ * v2.0.22: the v2.0.21 audio-focus implementation looked correct on paper
+ * but on Xiaomi POCO F5 / HyperOS 3.0.40 the radio kept playing on top of
+ * other apps' audio. Hardening:
+ *   - Eagerly initialize the focus listener + AudioFocusRequest in load()
+ *     so they exist before any first request, never lazily.
+ *   - Aggressive logcat on every focus boundary (request / loss / gain /
+ *     listener identity hash) so future regressions are diagnosable.
+ *   - Belt-and-braces JS dispatch: notifyListeners (Capacitor event) AND
+ *     bridge.eval(window.dispatchEvent(new CustomEvent(...))) — JS now
+ *     listens to both. If either path fires, we pause.
+ *   - Native fallback: on every LOSS we also evaluate
+ *     `document.querySelectorAll('audio').forEach(a => a.pause())` directly
+ *     against the WebView, so even if the JS bridge is asleep / not yet
+ *     hooked / Capacitor swallows the event, the underlying audio element
+ *     still gets paused at the DOM level.
+ *
  * JS contract:
  *   - BackgroundAudio.start({ title, subtitle })   → acquire CPU + Wi-Fi locks
  *   - BackgroundAudio.stop()                       → release them
@@ -54,6 +71,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
  *   - BackgroundAudio.abandonAudioFocus()          → release focus
  *   - addListener('audioFocusLost',  ...)          → { transient: boolean }
  *   - addListener('audioFocusGained',...)          → {}
+ *   - window 'audioFocusLost' / 'audioFocusGained' CustomEvent (backup path)
  */
 @CapacitorPlugin(name = "BackgroundAudio")
 public class BackgroundAudioPlugin extends Plugin {
@@ -66,14 +84,29 @@ public class BackgroundAudioPlugin extends Plugin {
     private PowerManager.WakeLock wakeLock;
     private WifiManager.WifiLock wifiLock;
 
-    // Audio focus state. Created lazily in requestAudioFocus and reused so
-    // we hand the same listener instance to abandonAudioFocus() — required
-    // by AudioManager.abandonAudioFocus / AudioFocusRequest semantics.
+    // Audio focus state. The listener and AudioFocusRequest are built once,
+    // up front, in load() so they have stable identities for the whole
+    // lifetime of the plugin instance — and so the system holds the listener
+    // strongly via the AudioFocusRequest (no GC surprise).
     private AudioManager audioManager;
-    private AudioFocusRequest audioFocusRequest; // API 26+
+    private AudioFocusRequest audioFocusRequest; // API 26+ (built lazily but only once)
     private AudioManager.OnAudioFocusChangeListener focusListener;
     private boolean focusHeld = false;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    @Override
+    public void load() {
+        super.load();
+        // Eagerly create the listener so it exists with a stable identity
+        // before anyone touches focus. requestAudioFocus() will reuse this
+        // exact instance for AudioFocusRequest.setOnAudioFocusChangeListener.
+        ensureFocusListener();
+        // Pre-warm the AudioManager too — failure to fetch it here is
+        // unusual, but logging it now means we never silently no-op later.
+        ensureAudioManager();
+        Log.i(TAG, "load() done; listener=" + System.identityHashCode(focusListener)
+            + " audioManager=" + (audioManager != null));
+    }
 
     @PluginMethod
     public void start(PluginCall call) {
@@ -101,9 +134,11 @@ public class BackgroundAudioPlugin extends Plugin {
     @PluginMethod
     public void requestAudioFocus(PluginCall call) {
         boolean granted = false;
+        int requestResult = -1;
         try {
             AudioManager am = ensureAudioManager();
             if (am == null) {
+                Log.w(TAG, "requestAudioFocus: AudioManager null, can't request");
                 JSObject result = new JSObject();
                 result.put("granted", false);
                 call.resolve(result);
@@ -111,18 +146,30 @@ public class BackgroundAudioPlugin extends Plugin {
             }
             ensureFocusListener();
 
-            int requestResult;
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 if (audioFocusRequest == null) {
                     AudioAttributes attrs = new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
                         .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                         .build();
-                    audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                        .setAudioAttributes(attrs)
-                        .setAcceptsDelayedFocusGain(false)
-                        .setOnAudioFocusChangeListener(focusListener, mainHandler)
-                        .build();
+                    AudioFocusRequest.Builder b =
+                        new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                            .setAudioAttributes(attrs)
+                            .setAcceptsDelayedFocusGain(false)
+                            .setOnAudioFocusChangeListener(focusListener, mainHandler);
+                    // Tell the OS we'd rather pause than duck — radio streams
+                    // sound terrible at -20 dB next to a navigation voice
+                    // prompt, hard pause is the right behavior. Older devices
+                    // ignore this hint, in which case our LOSS_TRANSIENT_CAN_DUCK
+                    // listener still maps to a pause anyway.
+                    try {
+                        b.setWillPauseWhenDucked(true);
+                    } catch (Throwable ignored) {
+                        // Method exists on API 26+ but be defensive
+                    }
+                    audioFocusRequest = b.build();
+                    Log.i(TAG, "requestAudioFocus: built AudioFocusRequest=" + System.identityHashCode(audioFocusRequest)
+                        + " listener=" + System.identityHashCode(focusListener));
                 }
                 requestResult = am.requestAudioFocus(audioFocusRequest);
             } else {
@@ -135,12 +182,17 @@ public class BackgroundAudioPlugin extends Plugin {
 
             granted = requestResult == AudioManager.AUDIOFOCUS_REQUEST_GRANTED;
             focusHeld = granted;
-            Log.i(TAG, "requestAudioFocus -> " + (granted ? "GRANTED" : "DENIED (" + requestResult + ")"));
+            Log.i(TAG, "requestAudioFocus result=" + requestResult
+                + " (" + (granted ? "GRANTED"
+                          : requestResult == AudioManager.AUDIOFOCUS_REQUEST_DELAYED ? "DELAYED"
+                          : requestResult == AudioManager.AUDIOFOCUS_REQUEST_FAILED ? "FAILED" : "?")
+                + ") focusHeld=" + focusHeld);
         } catch (Exception e) {
             Log.w(TAG, "requestAudioFocus threw", e);
         }
         JSObject result = new JSObject();
         result.put("granted", granted);
+        result.put("rawResult", requestResult);
         call.resolve(result);
     }
 
@@ -153,12 +205,15 @@ public class BackgroundAudioPlugin extends Plugin {
         try {
             AudioManager am = ensureAudioManager();
             if (am != null) {
+                int result;
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     if (audioFocusRequest != null) {
-                        am.abandonAudioFocusRequest(audioFocusRequest);
+                        result = am.abandonAudioFocusRequest(audioFocusRequest);
+                        Log.i(TAG, "abandonAudioFocusRequest result=" + result);
                     }
                 } else if (focusListener != null) {
-                    am.abandonAudioFocus(focusListener);
+                    result = am.abandonAudioFocus(focusListener);
+                    Log.i(TAG, "abandonAudioFocus(listener) result=" + result);
                 }
             }
         } catch (Exception e) {
@@ -211,18 +266,18 @@ public class BackgroundAudioPlugin extends Plugin {
     private void ensureFocusListener() {
         if (focusListener != null) return;
         focusListener = focusChange -> {
-            // The framework can deliver these on the main thread (when we
-            // pass mainHandler to AudioFocusRequest), but on older API levels
-            // the callback can land on whatever thread the system chooses.
-            // notifyListeners is thread-safe in Capacitor, so we just emit.
+            // The framework dispatches on mainHandler when we passed it to
+            // AudioFocusRequest. Even so, treat this as opaque-thread and
+            // route everything through the standard plumbing.
+            Log.i(TAG, "onAudioFocusChange focusChange=" + focusChange
+                + " focusHeld(was)=" + focusHeld);
             switch (focusChange) {
                 case AudioManager.AUDIOFOCUS_LOSS: {
                     focusHeld = false;
                     JSObject data = new JSObject();
                     data.put("transient", false);
                     data.put("canDuck", false);
-                    Log.i(TAG, "AUDIOFOCUS_LOSS");
-                    notifyListeners("audioFocusLost", data);
+                    notifyAudioFocusLost(data);
                     break;
                 }
                 case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT: {
@@ -230,8 +285,7 @@ public class BackgroundAudioPlugin extends Plugin {
                     JSObject data = new JSObject();
                     data.put("transient", true);
                     data.put("canDuck", false);
-                    Log.i(TAG, "AUDIOFOCUS_LOSS_TRANSIENT");
-                    notifyListeners("audioFocusLost", data);
+                    notifyAudioFocusLost(data);
                     break;
                 }
                 case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK: {
@@ -242,20 +296,90 @@ public class BackgroundAudioPlugin extends Plugin {
                     JSObject data = new JSObject();
                     data.put("transient", true);
                     data.put("canDuck", true);
-                    Log.i(TAG, "AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK (treated as transient pause)");
-                    notifyListeners("audioFocusLost", data);
+                    notifyAudioFocusLost(data);
                     break;
                 }
                 case AudioManager.AUDIOFOCUS_GAIN: {
                     focusHeld = true;
-                    Log.i(TAG, "AUDIOFOCUS_GAIN");
-                    notifyListeners("audioFocusGained", new JSObject());
+                    notifyAudioFocusGained();
                     break;
                 }
                 default:
-                    Log.d(TAG, "Audio focus change: " + focusChange);
+                    Log.d(TAG, "Audio focus change (unhandled): " + focusChange);
             }
         };
+        Log.i(TAG, "ensureFocusListener built listener=" + System.identityHashCode(focusListener));
+    }
+
+    /**
+     * Belt-and-braces JS dispatch for an AUDIOFOCUS_LOSS:
+     *   1. Capacitor plugin event {@code audioFocusLost} (the standard path).
+     *   2. window-level CustomEvent (in case JS hadn't subscribed via the
+     *      Capacitor listener yet — registers earlier in app boot, no async
+     *      bridge handshake needed).
+     *   3. Direct DOM-level pause of every {@code <audio>} on the page,
+     *      evaluated against the WebView. This is the actual user-facing
+     *      action; even if all our event plumbing somehow fails, the audio
+     *      goes silent. JS-level state will reconcile via the audio
+     *      element's own pause event handler.
+     */
+    private void notifyAudioFocusLost(JSObject data) {
+        Log.i(TAG, "notifyAudioFocusLost transient=" + data.optBoolean("transient", false)
+            + " canDuck=" + data.optBoolean("canDuck", false));
+        try {
+            notifyListeners("audioFocusLost", data);
+        } catch (Exception e) {
+            Log.w(TAG, "notifyListeners(audioFocusLost) threw", e);
+        }
+        try {
+            String json = data.toString();
+            String js = "window.dispatchEvent(new CustomEvent('audioFocusLost', { detail: " + json + " }));"
+                + "document.querySelectorAll('audio').forEach(function(a){ try { a.pause(); } catch(e) {} });";
+            evalOnWebView(js);
+        } catch (Exception e) {
+            Log.w(TAG, "evalOnWebView(audioFocusLost) threw", e);
+        }
+    }
+
+    private void notifyAudioFocusGained() {
+        Log.i(TAG, "notifyAudioFocusGained");
+        try {
+            notifyListeners("audioFocusGained", new JSObject());
+        } catch (Exception e) {
+            Log.w(TAG, "notifyListeners(audioFocusGained) threw", e);
+        }
+        try {
+            // Don't auto-play from native — let JS decide based on whether
+            // it was paused by us (transient loss) or by user. Just dispatch
+            // the event so JS can react.
+            String js = "window.dispatchEvent(new CustomEvent('audioFocusGained', { detail: {} }));";
+            evalOnWebView(js);
+        } catch (Exception e) {
+            Log.w(TAG, "evalOnWebView(audioFocusGained) threw", e);
+        }
+    }
+
+    private void evalOnWebView(final String js) {
+        // Bridge isn't always available off the main thread; hop to main.
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            evalNow(js);
+        } else {
+            mainHandler.post(() -> evalNow(js));
+        }
+    }
+
+    private void evalNow(String js) {
+        try {
+            if (getBridge() != null && getBridge().getWebView() != null) {
+                getBridge().getWebView().evaluateJavascript(js, (ValueCallback<String>) value -> {
+                    // We don't care about the return value, just that it ran.
+                });
+            } else {
+                Log.w(TAG, "evalOnWebView: bridge/webview null, can't run js");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "evaluateJavascript threw", e);
+        }
     }
 
     private void acquireLocks() {

@@ -2,6 +2,32 @@
 
 所有重要变更都会记录在这里。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.0.22] - 2026-06-15
+
+### Fixed
+
+- **(关键) 其他 app 出声时收音机不暂停 / 双流叠加** —— v2.0.21 接了 audio focus 但真机上没用，实测 POCO F5 / HyperOS 3.0.40 启动其他出声 app 后我们的电台依然在响。**根因不在 native 焦点路径，而在 `src/stores/player.ts` 的 `audio.addEventListener('pause', ...)` 自愈逻辑**：那段代码是 v2.0.13 写的"屏幕熄灭后 WebView 偷偷暂停 → 500ms 后自动 resume"兜底，但当其他 app 抢走焦点、Chromium 内部把我们的 `<audio>` 暂停时，这段代码以为还在 playing 就把音频又拽回来——和新焦点持有者干，两路声同时响。
+- 修复（多管齐下）：
+  - `src/stores/player.ts`: 新增 `lastExternalPauseHintAt` 时间戳。任何外部 pause hint（focus loss 事件、native 直接 dispatch）落地都会刷这个戳；`pause` 事件 handler 在 5 秒内一律不触发自动 resume。屏幕熄灭兜底依然生效（无外部 hint 时）。
+  - `src/stores/player.ts`: 焦点丢失 handler 从"先看 playbackIntent 再决定"改成无条件 `audio.value.pause()` + 设 hint timestamp，再调 `pauseStation('focus-loss')` 处理 store-level 状态，避免 store 还没同步时音频已经被 Chromium 自己暂停了我们却没记上。
+  - `src/utils/backgroundAudio.ts`: `addAudioFocusListeners` 现在双通道订阅 — Capacitor plugin 事件 **和** `window.dispatchEvent('audioFocusLost')` 兜底，前者要异步 handshake 慢，后者从 native bridge eval 直接派发不需要握手。
+- 修复（native 端 `BackgroundAudioPlugin.java`）：
+  - `load()` 里**预先**创建 `OnAudioFocusChangeListener` + `AudioManager`，不再 lazy。listener 拿了稳定身份 hash code，后续 `requestAudioFocus` 全程引用同一 instance，杜绝任何 GC/重建嫌疑。
+  - 焦点丢失 callback 里同时三重派发：`notifyListeners('audioFocusLost')`、`bridge.evaluateJavascript("window.dispatchEvent(...)")`、`document.querySelectorAll('audio').forEach(a => a.pause())` — 即使 JS 桥彻底睡死，DOM 层 audio 元素也会被强制暂停。
+  - `setWillPauseWhenDucked(true)` 加进 AudioFocusRequest builder。
+  - 全链路 `Log.i(TAG, ...)` 打 grant result、focus change code、listener identity hash —— 出问题 logcat -s BackgroundAudioPlugin 就能看清。
+- **MIUI MediaStyle 卡片不持久** —— v2.0.21 只解决了一半。补丁三方面加固：
+  - **通道名本地化**（`patches/@jofr+capacitor-media-session+3.0.3.patch` `MediaSessionService.java`）：通道 ID 仍是 `"playback"`（不能改，会孤儿化老用户偏好），但显示名从 hardcoded `"Playback"` 改成 `getResources().getIdentifier("playback_channel_name", ...)` 查应用自带 string —— `values/strings.xml` 给 `Music`、`values-zh-rCN/strings.xml` 给 `音乐`，对齐小米自带音乐 app 的通道名。**带一次性迁移**：`global_radio_media_session` SharedPreferences 里 `channelMigratedV222` flag，老用户首次启动 v2.0.22 会先 `deleteNotificationChannel("playback")` 再重建（Android 缓存通道名，不删除直接覆盖名字不生效）。
+  - **强化通知形态**：`setCategory(CATEGORY_TRANSPORT)`、`setColorized(true)`、`setColor(0xFF007AFF)` 加进 builder——MIUI media-card filter 关键词；`setForegroundServiceBehavior(FOREGROUND_SERVICE_IMMEDIATE)` 在 Android 12+ 上要求立即显示通知，避免最长 10 秒的"deferred display"窗口里 MIUI 把我们 drop 掉。
+  - 占位 notification 也加上同一套 category / colorized / IMMEDIATE，保证从首次贴图到 MediaStyle 真通知期间形态一致。
+- 验证：
+  - emulator 实测 audio focus loss 路径：起播 BBC → 通过 Google Assistant 抢焦点 → logcat 看到 `AUDIOFOCUS_LOSS_TRANSIENT` → JS 收到 `audio focus lost (transient=true)` → `audio.pause()` 实际触发，`<audio>.paused === true`；按 ESC 退出 Assistant → `AUDIOFOCUS_GAIN` → `resumeStation()` 自动恢复。完整 logcat 见 `/tmp/v222-focus-loss.log`。
+  - emulator 实测通道名：locale 切到 zh-CN 重启后，Settings → Apps → Global Radio → Notifications 显示通道名为 **音乐**；切回 en-US 显示 **Music**。截图 `/tmp/v222-channel-name-zh.png`、`/tmp/v222-channel-name-en.png`。
+  - `dumpsys notification --noredact` 抓取我们 NOTIFICATION_ID=1 的 record（`/tmp/v222-dumpsys.txt`），确认包含 `category=transport`、`mColor=...` 非默认值、`mColorized=true`、`MediaStyle` 模板、`mediaSession` token。
+  - pause / resume / 切站循环 3 次后，notification record 仍存在且 MediaStyle 仍生效。
+  - 媒体卡片 + 搜索按钮蓝 v2.0.18+ 修复路径未回退（截图 `/tmp/v222-regression-media.png` / `/tmp/v222-regression-search.png`）。
+- 真机 (POCO F5 / HyperOS 3.0.40) 才能验证：MIUI 自家"激进 dismiss → notify() 拉不回"行为。该路径在 v2.0.21 的 re-startForeground 之上再叠加上面所有形态强化，理论上把 MIUI 的几条已知 trigger 都堵住了，但具体管不管用还得请你再测一次：起播 → 拉下通知栏看大卡片 → 暂停 → 恢复 → 切电台，每一步卡片都应该在。
+
 ## [2.0.21] - 2026-06-15
 
 ### Fixed

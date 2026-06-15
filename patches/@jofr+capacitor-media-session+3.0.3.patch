@@ -101,10 +101,10 @@ index 6f54b7f..dfb3ef5 100644
          if (service != null) { updateServiceMetadata(); };
          call.resolve();
 diff --git a/node_modules/@jofr/capacitor-media-session/android/src/main/java/io/github/jofr/capacitor/mediasessionplugin/MediaSessionService.java b/node_modules/@jofr/capacitor-media-session/android/src/main/java/io/github/jofr/capacitor/mediasessionplugin/MediaSessionService.java
-index cb0417f..e397b10 100644
+index cb0417f..278e3f8 100644
 --- a/node_modules/@jofr/capacitor-media-session/android/src/main/java/io/github/jofr/capacitor/mediasessionplugin/MediaSessionService.java
 +++ b/node_modules/@jofr/capacitor-media-session/android/src/main/java/io/github/jofr/capacitor/mediasessionplugin/MediaSessionService.java
-@@ -1,6 +1,7 @@
+@@ -1,11 +1,14 @@
  package io.github.jofr.capacitor.mediasessionplugin;
  
  import android.annotation.SuppressLint;
@@ -112,7 +112,14 @@ index cb0417f..e397b10 100644
  import android.app.NotificationChannel;
  import android.app.NotificationManager;
  import android.app.PendingIntent;
-@@ -60,6 +61,7 @@ public class MediaSessionService extends Service {
+ import android.app.Service;
++import android.content.Context;
+ import android.content.Intent;
++import android.content.SharedPreferences;
+ import android.content.pm.ServiceInfo;
+ import android.graphics.Bitmap;
+ import android.os.Build;
+@@ -60,6 +63,7 @@ public class MediaSessionService extends Service {
      private MediaSessionCallback callback;
  
      private final IBinder binder = new LocalBinder();
@@ -120,7 +127,7 @@ index cb0417f..e397b10 100644
  
      public final class LocalBinder extends Binder {
          MediaSessionService getService() {
-@@ -79,6 +81,51 @@ public class MediaSessionService extends Service {
+@@ -79,6 +83,122 @@ public class MediaSessionService extends Service {
          return super.onUnbind(intent);
      }
  
@@ -132,9 +139,61 @@ index cb0417f..e397b10 100644
 +        // whether connectAndInitialize() has had a chance to run.
 +        notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
 +        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && notificationManager != null) {
++            ensurePlaybackChannel();
++        }
++    }
++
++    /**
++     * Patched (v2.0.22): create — and one-time migrate — the "playback"
++     * notification channel. The channel ID stays {@code "playback"}
++     * forever (renaming would orphan the user's channel-level prefs). The
++     * channel *display name* is now the localized
++     * {@code R.string.playback_channel_name} (defaults: "Music" / "音乐"),
++     * since on MIUI/HyperOS we noticed the system's media-card filter
++     * keys on a music-shaped channel name (Xiaomi's built-in music app
++     * uses "音乐" exactly) — keeping it as the previous "Playback" was a
++     * partial cause of MediaStyle cards getting demoted to plain
++     * notifications.
++     *
++     * Android caches the channel name from the first
++     * {@code createNotificationChannel} call and ignores subsequent name
++     * updates. To migrate users already on v2.0.21 with the old "Playback"
++     * channel, we delete it ONCE (gated by SharedPreferences) and recreate
++     * with the new name.
++     */
++    private void ensurePlaybackChannel() {
++        if (notificationManager == null) return;
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
++        try {
++            SharedPreferences prefs = getSharedPreferences(
++                "global_radio_media_session", Context.MODE_PRIVATE);
++            boolean migrated = prefs.getBoolean("channelMigratedV222", false);
++            if (!migrated) {
++                try {
++                    notificationManager.deleteNotificationChannel("playback");
++                } catch (Exception ignored) {
++                    // No prior channel — that's fine.
++                }
++                prefs.edit().putBoolean("channelMigratedV222", true).apply();
++                Log.i(TAG, "Migrated playback channel: deleted old, will recreate with new name");
++            }
++            String name = "Music";
++            try {
++                int id = getResources().getIdentifier(
++                    "playback_channel_name", "string", getPackageName());
++                if (id != 0) {
++                    name = getString(id);
++                }
++            } catch (Exception e) {
++                Log.w(TAG, "playback_channel_name lookup failed; using fallback", e);
++            }
 +            NotificationChannel channel = new NotificationChannel(
-+                "playback", "Playback", NotificationManager.IMPORTANCE_LOW);
++                "playback", name, NotificationManager.IMPORTANCE_LOW);
++            channel.setDescription(name);
++            channel.setShowBadge(false);
 +            notificationManager.createNotificationChannel(channel);
++        } catch (Exception e) {
++            Log.w(TAG, "ensurePlaybackChannel failed", e);
 +        }
 +    }
 +
@@ -150,12 +209,31 @@ index cb0417f..e397b10 100644
 +    private void ensureForegroundStarted() {
 +        if (foregroundStarted) return;
 +        try {
++            // The placeholder is intentionally minimal — it exists only to
++            // satisfy the Android 14 5-second startForeground window before
++            // connectAndInitialize() runs. We can't attach MediaStyle yet
++            // because mediaSession isn't built (it's created in
++            // connectAndInitialize, which is triggered by bindService →
++            // onServiceConnected which is racing this very method). We DO
++            // mark transport category + colorized so OEMs (especially MIUI)
++            // see a consistent media-shaped notification across both the
++            // placeholder and the real one — minimizes the window where
++            // MIUI might classify us as a plain notification.
 +            NotificationCompat.Builder placeholderBuilder =
 +                new NotificationCompat.Builder(this, "playback")
 +                    .setSmallIcon(R.drawable.ic_baseline_volume_up_24)
 +                    .setContentTitle("Playback")
 +                    .setOngoing(true)
-+                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
++                    .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
++                    .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
++                    .setColor(0xFF007AFF)
++                    .setColorized(true);
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++                try {
++                    placeholderBuilder.setForegroundServiceBehavior(
++                        NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE);
++                } catch (Throwable ignored) {}
++            }
 +            Notification placeholder = placeholderBuilder.build();
 +            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
 +                startForeground(NOTIFICATION_ID, placeholder,
@@ -172,7 +250,7 @@ index cb0417f..e397b10 100644
      public void connectAndInitialize(MediaSessionPlugin plugin, Intent intent) {
          this.plugin = plugin;
  
-@@ -95,10 +142,10 @@ public class MediaSessionService extends Service {
+@@ -95,10 +215,11 @@ public class MediaSessionService extends Service {
                  .putLong(MediaMetadataCompat.METADATA_KEY_DURATION, duration);
          mediaSession.setMetadata(mediaMetadataBuilder.build());
  
@@ -184,19 +262,15 @@ index cb0417f..e397b10 100644
 +        // so they are guaranteed to exist before any startForeground call.
 +        if (notificationManager == null) {
 +            notificationManager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
++            ensurePlaybackChannel();
          }
  
          notificationStyle = new MediaStyle().setMediaSession(mediaSession.getSessionToken());
-@@ -106,12 +153,34 @@ public class MediaSessionService extends Service {
+@@ -106,12 +227,55 @@ public class MediaSessionService extends Service {
                  .setStyle(notificationStyle)
                  .setSmallIcon(R.drawable.ic_baseline_volume_up_24)
                  .setContentIntent(PendingIntent.getActivity(getApplicationContext(), 0, intent, PendingIntent.FLAG_IMMUTABLE))
 -                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
--
--        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
--          startForeground(NOTIFICATION_ID, notificationBuilder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
--        } else {
--          startForeground(NOTIFICATION_ID, notificationBuilder.build());
 +                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
 +                // Patched: keep the notification "ongoing" regardless of play/pause
 +                // state. MIUI/HyperOS treats non-ongoing notifications as
@@ -204,8 +278,33 @@ index cb0417f..e397b10 100644
 +                // pruned, NotificationManager.notify() can't bring them back.
 +                // Always-ongoing + re-startForeground (see updateNotification
 +                // below) is the supported way to keep the MediaStyle card pinned.
-+                .setOngoing(true);
-+
++                .setOngoing(true)
++                // Patched (v2.0.22): MIUI's media-card filter prefers
++                // "transport" category notifications. Strictly speaking
++                // MediaStyle should be sufficient, but adding category
++                // explicitly costs nothing and helps OEM heuristics.
++                .setCategory(NotificationCompat.CATEGORY_TRANSPORT)
++                // Patched (v2.0.22): colorize so the system "Now Playing"
++                // surface tints with our brand color. iOS-style blue.
++                .setColor(0xFF007AFF)
++                .setColorized(true);
++        // Patched (v2.0.22): on Android 12+ ask for IMMEDIATE foreground
++        // notification display — without this hint the system can defer
++        // showing the notification by up to 10 seconds, during which MIUI
++        // sometimes drops it entirely.
++        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
++            try {
++                notificationBuilder.setForegroundServiceBehavior(
++                    NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE);
++            } catch (Throwable ignored) {
++                // androidx.core version mismatch — fall through.
++            }
++        }
+ 
+-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+-          startForeground(NOTIFICATION_ID, notificationBuilder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
+-        } else {
+-          startForeground(NOTIFICATION_ID, notificationBuilder.build());
 +        // Patched: prefer startForeground() over notificationManager.notify()
 +        // for posting / replacing the rich MediaStyle notification. On stock
 +        // AOSP it's a no-op once we're foreground; on MIUI/HyperOS the only
@@ -228,7 +327,7 @@ index cb0417f..e397b10 100644
          }
  
          notificationActions.put("play", new NotificationCompat.Action(
-@@ -153,7 +222,16 @@ public class MediaSessionService extends Service {
+@@ -153,7 +317,16 @@ public class MediaSessionService extends Service {
  
      @Override
      public int onStartCommand(Intent intent, int flags, int startId) {
@@ -246,7 +345,7 @@ index cb0417f..e397b10 100644
          return super.onStartCommand(intent, flags, startId);
      }
  
-@@ -290,8 +368,39 @@ public class MediaSessionService extends Service {
+@@ -290,8 +463,39 @@ public class MediaSessionService extends Service {
              notificationBuilder
                      .setContentTitle(title)
                      .setContentText(artist + " - " + album)

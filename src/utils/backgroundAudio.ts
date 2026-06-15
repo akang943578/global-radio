@@ -89,27 +89,69 @@ export const abandonAudioFocus = async (): Promise<void> => {
 /**
  * Subscribe to native audio-focus events. Returns an unsubscribe function.
  * No-op on non-Android platforms (returns a no-op unsubscribe).
+ *
+ * v2.0.22: belt-and-braces. We register on BOTH the Capacitor plugin event
+ * channel AND a window-level CustomEvent fallback. The native plugin
+ * dispatches both, so whichever wires up first / faster wins, and we
+ * de-dupe on the JS side via timestamps in the consumer (player store).
+ *
+ * Why two channels: on POCO F5 / HyperOS 3.0.40 we suspected the
+ * Capacitor `addListener` registration occasionally races behind first
+ * playback on slow boots. The window event fires immediately from the
+ * native bridge eval and doesn't need the JS-side handshake to be
+ * complete.
  */
 export const addAudioFocusListeners = async (handlers: {
   onLost?: (event: AudioFocusLostEvent) => void
   onGained?: (event: AudioFocusGainedEvent) => void
 }): Promise<() => void> => {
-  if (!isNativeAndroid()) return () => undefined
   const handles: PluginListenerHandle[] = []
-  try {
-    if (handlers.onLost) {
-      handles.push(await BackgroundAudio.addListener('audioFocusLost', handlers.onLost))
+  const cleanup: Array<() => void> = []
+
+  // Always wire window-level fallback (works on any platform that has a
+  // DOM) so the bridge.eval-dispatched CustomEvent reaches us.
+  if (handlers.onLost && typeof window !== 'undefined') {
+    const winHandler = (e: Event) => {
+      const detail = (e as CustomEvent<AudioFocusLostEvent>).detail || {
+        transient: false,
+        canDuck: false
+      }
+      handlers.onLost!(detail)
     }
-    if (handlers.onGained) {
-      handles.push(await BackgroundAudio.addListener('audioFocusGained', handlers.onGained))
-    }
-  } catch (error) {
-    console.warn('[backgroundAudio] addAudioFocusListeners failed:', error)
+    window.addEventListener('audioFocusLost', winHandler as EventListener)
+    cleanup.push(() => window.removeEventListener('audioFocusLost', winHandler as EventListener))
   }
+  if (handlers.onGained && typeof window !== 'undefined') {
+    const winHandler = () => handlers.onGained!({})
+    window.addEventListener('audioFocusGained', winHandler)
+    cleanup.push(() => window.removeEventListener('audioFocusGained', winHandler))
+  }
+
+  // Capacitor plugin event channel — only meaningful on native Android.
+  if (isNativeAndroid()) {
+    try {
+      if (handlers.onLost) {
+        handles.push(await BackgroundAudio.addListener('audioFocusLost', handlers.onLost))
+      }
+      if (handlers.onGained) {
+        handles.push(await BackgroundAudio.addListener('audioFocusGained', handlers.onGained))
+      }
+    } catch (error) {
+      console.warn('[backgroundAudio] addAudioFocusListeners (plugin channel) failed:', error)
+    }
+  }
+
   return () => {
     for (const h of handles) {
       try {
         void h.remove()
+      } catch {
+        // ignore
+      }
+    }
+    for (const fn of cleanup) {
+      try {
+        fn()
       } catch {
         // ignore
       }
