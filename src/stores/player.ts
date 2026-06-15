@@ -17,7 +17,13 @@ import {
 } from '@/utils/streamUrl'
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import { MediaSession } from '@jofr/capacitor-media-session'
-import { startBackgroundAudio, stopBackgroundAudio } from '@/utils/backgroundAudio'
+import {
+  startBackgroundAudio,
+  stopBackgroundAudio,
+  requestAudioFocus,
+  abandonAudioFocus,
+  addAudioFocusListeners
+} from '@/utils/backgroundAudio'
 
 export const usePlayerStore = defineStore('player', () => {
   // 状态
@@ -53,6 +59,16 @@ export const usePlayerStore = defineStore('player', () => {
   // down when the user switches stations / pauses / stops before the timer
   // fires.
   let cancelAutoFallback: (() => void) | null = null
+
+  // Audio-focus bookkeeping (v2.0.21). The native plugin requests
+  // AUDIOFOCUS_GAIN around playback so other apps don't mix on top of us.
+  // When the system briefly takes focus away (incoming call, navigation
+  // prompt, Spotify starting), it tells us via the audioFocusLost event
+  // with `transient: true`. We pause and remember it was the OS — so on
+  // the matching audioFocusGained we auto-resume. A non-transient loss
+  // means a permanent eviction (user opened another music app) — we pause
+  // and stay paused, the user has to come back and press play.
+  const pausedByFocusLoss = ref(false)
 
   const noteRecoveryAttempt = () => {
     pauseRecoveryAttempts++
@@ -706,11 +722,23 @@ export const usePlayerStore = defineStore('player', () => {
 
       playbackIntent.value = 'playing'
       pauseRecoveryAttempts = 0
+      // Any successful play() = user explicitly wants audio. Reset the
+      // focus-loss flag so a stale transient pause from before doesn't
+      // accidentally trigger an auto-resume cycle.
+      pausedByFocusLoss.value = false
       mediaSessionManager.updateMetadata(station)
       mediaSessionManager.updatePlaybackState(true)
       await announceNativeMetadata(station)
       await announceNativePlaybackState('playing')
       await startBackgroundAudio(station)
+      // Ask Android for audio focus so Spotify / phone calls / nav prompts
+      // get exclusive use of the speaker (and we get told to pause via the
+      // listener registered below). granted=false on weird OEMs is logged
+      // and we proceed anyway — denying focus doesn't mean denying audio.
+      const granted = await requestAudioFocus()
+      if (!granted) {
+        console.warn('[playback] audio focus not granted; other apps may mix on top')
+      }
 
       // 只在「直连」分支挂自动回退；走代理的（HLS / mixed-content / 用户强制
       // 代理 / 本会话曾经回退过的电台）已经是兜底路径，再失败就是真的挂了，
@@ -739,8 +767,14 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   // 暂停播放
-  const pauseStation = async () => {
+  const pauseStation = async (cause: 'user' | 'focus-loss' = 'user') => {
     playbackIntent.value = 'paused'
+    if (cause === 'user') {
+      // User-initiated pause — discard any pending auto-resume so we
+      // don't surprise them by suddenly playing again when focus comes
+      // back from an unrelated transient loss earlier in the session.
+      pausedByFocusLoss.value = false
+    }
     clearAutoFallback()
     if (audio.value) {
       audio.value.pause()
@@ -755,10 +789,20 @@ export const usePlayerStore = defineStore('player', () => {
       try {
         playbackIntent.value = 'playing'
         pauseRecoveryAttempts = 0
+        // Manual resume → no longer "paused by focus loss"; clear the
+        // flag so the OS giving us focus back later doesn't double-fire.
+        pausedByFocusLoss.value = false
         await audio.value.play()
         mediaSessionManager.updatePlaybackState(true)
         await announceNativePlaybackState('playing')
         await startBackgroundAudio(currentStation.value)
+        // Re-acquire focus on every resume so the OS knows we're back in
+        // the audio mix; without this Android may still consider us
+        // background-paused and route media keys elsewhere.
+        const granted = await requestAudioFocus()
+        if (!granted) {
+          console.warn('[playback] audio focus not granted on resume')
+        }
       } catch (err) {
         console.error('恢复播放失败')
         console.error('恢复播放错误:', err)
@@ -769,6 +813,7 @@ export const usePlayerStore = defineStore('player', () => {
   // 停止播放
   const stopStation = async () => {
     playbackIntent.value = 'stopped'
+    pausedByFocusLoss.value = false
     clearAutoFallback()
     destroyHls()
     if (audio.value) {
@@ -782,6 +827,7 @@ export const usePlayerStore = defineStore('player', () => {
     mediaSessionManager.clear()
     await announceNativePlaybackState('none')
     await stopBackgroundAudio()
+    await abandonAudioFocus()
   }
 
   // 设置音量
@@ -947,6 +993,41 @@ export const usePlayerStore = defineStore('player', () => {
       console.error('从本地存储恢复状态失败:', error)
     }
   }
+
+  // Wire native audio-focus events from the BackgroundAudio plugin (v2.0.21).
+  // Android delivers AUDIOFOCUS_LOSS / GAIN through a system listener; the
+  // plugin bridges those into Capacitor events. We translate them into the
+  // standard radio UX:
+  //   - permanent loss → pause and stay paused (Spotify/podcast etc.)
+  //   - transient loss → pause; resume on the next gain (call/nav prompt)
+  // No-op on web/iOS (the helper returns immediately on non-Android).
+  void addAudioFocusListeners({
+    onLost: (event) => {
+      if (playbackIntent.value !== 'playing' || !audio.value) {
+        // We weren't playing anyway — nothing to do.
+        return
+      }
+      pausedByFocusLoss.value = !!event.transient
+      // We pass cause: 'focus-loss' so pauseStation does NOT clobber the
+      // pausedByFocusLoss flag we just set. If the loss is non-transient
+      // we leave pausedByFocusLoss=false and the user must press play.
+      void pauseStation('focus-loss')
+    },
+    onGained: () => {
+      // Only auto-resume if the OS-driven transient pause is still pending
+      // and the user hasn't moved on to a different station / pressed stop.
+      if (
+        pausedByFocusLoss.value &&
+        currentStation.value &&
+        playbackIntent.value === 'paused'
+      ) {
+        pausedByFocusLoss.value = false
+        void resumeStation()
+      }
+    }
+  }).catch((err) => {
+    console.warn('[playback] addAudioFocusListeners failed:', err)
+  })
 
   // 初始化
   loadFavorites()

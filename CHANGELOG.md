@@ -2,6 +2,33 @@
 
 所有重要变更都会记录在这里。版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [2.0.21] - 2026-06-15
+
+### Fixed
+
+- **MIUI / HyperOS 上 MediaStyle 下拉卡片只显示一次**（小米 POCO F5 / HyperOS 3.0.40 实测）—— 首次开播时大卡片确实出来了，但后续 pause→resume / 切电台 / app 冷启动后再开播都不再贴回通知栏。原因是 `@jofr/capacitor-media-session` 走 `notificationManager.notify(NOTIFICATION_ID, ...)` 来更新通知，而 MIUI 对 ongoing notification 的 dismiss 异常激进，被收起 / 划走之后 `notify()` 根本拉不回来。
+- 修复（`patches/@jofr+capacitor-media-session+3.0.3.patch` 给 `MediaSessionService.java` 加两条 hunk）：
+  - `update()` 里所有 `notificationUpdate` 分支：把 `notificationManager.notify(NOTIFICATION_ID, build)` 改成"如果 `foregroundStarted` 就走 `startForeground(NOTIFICATION_ID, notif, FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)`，抛异常才 fallback 到 `notify()`"。在原生 AOSP 上 re-call `startForeground` 是 no-op；在 MIUI 上这是唯一能把通知卡片重新挂回 foreground notification slot 的官方姿势；
+  - `connectAndInitialize()` 把"占位通知 → 真 MediaStyle 通知"的切换也改成 `startForeground` 优先（不再 `notify()`），逻辑统一；
+  - `notificationBuilder` 上始终设 `setOngoing(true)`，无论 play/pause —— MIUI 把非 ongoing 的通知当垃圾扫掉。
+- **⚠️ 真机依赖**：emulator 跑的是原生 AOSP，没有 MIUI 的"激进 dismiss"行为，**这条修复在 emulator 上没法直接验证**。代码改动在原生 AOSP 上是 no-op、不影响现有路径，所以现网行为不会回退；MIUI 修没修好需要小米真机现场验证。
+- **多 app 同时出声 / 没有 audio focus**（同台真机）—— WebView 里的 `<audio>` 不会自动请求 `AudioManager.AUDIOFOCUS_GAIN`，所以 Spotify / 通话 / 导航语音 / 视频起来时收音机继续大喇叭，两路声音同时往扬声器灌。
+- 修复（`android/app/src/main/java/com/globalradio/app/BackgroundAudioPlugin.java` 加 audio focus 全套）：
+  - 新增 `requestAudioFocus()` / `abandonAudioFocus()` 两个 `@PluginMethod`，API 26+ 走 `AudioFocusRequest.Builder` + `AudioAttributes(USAGE_MEDIA, CONTENT_TYPE_MUSIC)`，更老的 SDK 走 legacy `requestAudioFocus(listener, STREAM_MUSIC, AUDIOFOCUS_GAIN)`；
+  - `OnAudioFocusChangeListener` 把焦点变化通过 `notifyListeners` 桥给 JS：`AUDIOFOCUS_LOSS` → `audioFocusLost {transient: false}`、`AUDIOFOCUS_LOSS_TRANSIENT` / `AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK` → `audioFocusLost {transient: true}`、`AUDIOFOCUS_GAIN` → `audioFocusGained`。Duck 也按 transient 处理（电台 duck 起来听感很差，硬暂停体验更好）；
+  - 起播 / resume 后调 `requestAudioFocus()`，stop 时 `abandonAudioFocus()`，`handleOnDestroy()` 里也兜底释放；
+- 修复（`src/utils/backgroundAudio.ts` + `src/stores/player.ts`）：
+  - `backgroundAudio.ts` 暴露 `requestAudioFocus` / `abandonAudioFocus` / `addAudioFocusListeners` 三个 helper，全部 native-Android-only，web/iOS 上 no-op；
+  - `player.ts` 新增 `pausedByFocusLoss` ref，store 创建时一次性挂上 `audioFocusLost` / `audioFocusGained` 监听：丢焦点 → 调 `pauseStation('focus-loss')` 但**不**清 `pausedByFocusLoss`；transient 拿回 → `resumeStation()`；非 transient 不自动恢复，让用户手动按播放（符合 Android UX 规范）；
+  - `pauseStation` 接受 `'user' | 'focus-loss'` 区分，用户主动暂停清掉自动恢复标志，避免之前的 transient pause 残留导致莫名其妙自己又响了。
+- emulator 验证（API 34 AVD）：开播任意一台后 `adb shell cmd media_session dispatch play` 调系统媒体焦点，`dumpsys audio` 能看到我们的 focus stack 在最前一项；`am start` 起 YouTube 视频或者拨号 app 也能看到 logcat 里 `AUDIOFOCUS_LOSS_TRANSIENT` → `pauseStation('focus-loss')` 路径打进来，radio `<audio>` 暂停。媒体下拉卡片、搜索按钮蓝、无 favicon 电台都仍然 OK，v2.0.18-v2.0.20 改动均无回退。
+
+### Notes
+
+- patch 重新生成走的是干净流程：`rm -rf node_modules/@jofr/capacitor-media-session/android/build && npx patch-package @jofr/capacitor-media-session`，diff 已写回 `patches/`。
+- `BackgroundAudio` 插件的 JS 注册位置仍在 `MainActivity.onCreate()` 里 `registerPlugin(BackgroundAudioPlugin.class)`，新增的两个 `@PluginMethod` 会被 Capacitor 反射自动暴露，不需要单独的 Decl 文件。
+- iOS 这版没改：`Info.plist` 里 `UIBackgroundModes=audio` 的方案本来就处理了 iOS 的 audio session 与焦点（`AVAudioSession`），不需要自己写 plugin。
+
 ## [2.0.20] - 2026-06-14
 
 ### Added

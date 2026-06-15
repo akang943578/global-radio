@@ -101,7 +101,7 @@ index 6f54b7f..dfb3ef5 100644
          if (service != null) { updateServiceMetadata(); };
          call.resolve();
 diff --git a/node_modules/@jofr/capacitor-media-session/android/src/main/java/io/github/jofr/capacitor/mediasessionplugin/MediaSessionService.java b/node_modules/@jofr/capacitor-media-session/android/src/main/java/io/github/jofr/capacitor/mediasessionplugin/MediaSessionService.java
-index cb0417f..3b4d736 100644
+index cb0417f..e397b10 100644
 --- a/node_modules/@jofr/capacitor-media-session/android/src/main/java/io/github/jofr/capacitor/mediasessionplugin/MediaSessionService.java
 +++ b/node_modules/@jofr/capacitor-media-session/android/src/main/java/io/github/jofr/capacitor/mediasessionplugin/MediaSessionService.java
 @@ -1,6 +1,7 @@
@@ -187,31 +187,48 @@ index cb0417f..3b4d736 100644
          }
  
          notificationStyle = new MediaStyle().setMediaSession(mediaSession.getSessionToken());
-@@ -108,10 +155,20 @@ public class MediaSessionService extends Service {
+@@ -106,12 +153,34 @@ public class MediaSessionService extends Service {
+                 .setStyle(notificationStyle)
+                 .setSmallIcon(R.drawable.ic_baseline_volume_up_24)
                  .setContentIntent(PendingIntent.getActivity(getApplicationContext(), 0, intent, PendingIntent.FLAG_IMMUTABLE))
-                 .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
- 
+-                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC);
+-
 -        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
 -          startForeground(NOTIFICATION_ID, notificationBuilder.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
-+        // Patched: in case ensureForegroundStarted() wasn't called yet
-+        // (defensive), still call startForeground here. Otherwise just
-+        // post/update via notify() since we're already foreground.
-+        if (!foregroundStarted) {
+-        } else {
+-          startForeground(NOTIFICATION_ID, notificationBuilder.build());
++                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
++                // Patched: keep the notification "ongoing" regardless of play/pause
++                // state. MIUI/HyperOS treats non-ongoing notifications as
++                // dismissable and aggressively prunes them — once swiped or
++                // pruned, NotificationManager.notify() can't bring them back.
++                // Always-ongoing + re-startForeground (see updateNotification
++                // below) is the supported way to keep the MediaStyle card pinned.
++                .setOngoing(true);
++
++        // Patched: prefer startForeground() over notificationManager.notify()
++        // for posting / replacing the rich MediaStyle notification. On stock
++        // AOSP it's a no-op once we're foreground; on MIUI/HyperOS the only
++        // reliable way to (re)mount the ongoing notification slot is to call
++        // startForeground each time. notify() alone gets dropped silently.
++        Notification initialNotification = notificationBuilder.build();
++        try {
 +            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-+                startForeground(NOTIFICATION_ID, notificationBuilder.build(),
++                startForeground(NOTIFICATION_ID, initialNotification,
 +                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
 +            } else {
-+                startForeground(NOTIFICATION_ID, notificationBuilder.build());
++                startForeground(NOTIFICATION_ID, initialNotification);
 +            }
 +            foregroundStarted = true;
-         } else {
--          startForeground(NOTIFICATION_ID, notificationBuilder.build());
-+            // Replace the placeholder with the real MediaStyle notification
-+            notificationManager.notify(NOTIFICATION_ID, notificationBuilder.build());
++        } catch (Exception e) {
++            Log.w(TAG, "startForeground in connectAndInitialize failed; falling back to notify()", e);
++            if (notificationManager != null) {
++                notificationManager.notify(NOTIFICATION_ID, initialNotification);
++            }
          }
  
          notificationActions.put("play", new NotificationCompat.Action(
-@@ -153,7 +210,16 @@ public class MediaSessionService extends Service {
+@@ -153,7 +222,16 @@ public class MediaSessionService extends Service {
  
      @Override
      public int onStartCommand(Intent intent, int flags, int startId) {
@@ -229,3 +246,45 @@ index cb0417f..3b4d736 100644
          return super.onStartCommand(intent, flags, startId);
      }
  
+@@ -290,8 +368,39 @@ public class MediaSessionService extends Service {
+             notificationBuilder
+                     .setContentTitle(title)
+                     .setContentText(artist + " - " + album)
+-                    .setLargeIcon(artwork);
+-            notificationManager.notify(NOTIFICATION_ID, notificationBuilder.build());
++                    .setLargeIcon(artwork)
++                    // Always ongoing — see comment in connectAndInitialize.
++                    .setOngoing(true);
++            // Patched (v2.0.21): on every metadata/state update, re-call
++            // startForeground(NOTIFICATION_ID, notif, type) instead of plain
++            // notificationManager.notify(...). On stock AOSP this is a no-op
++            // (we are already foreground), but on MIUI/HyperOS the system
++            // aggressively dismisses the ongoing media notification on
++            // pause→resume / station-change cycles, and notify() alone won't
++            // bring it back. Re-calling startForeground forces the system
++            // back into the foreground-notification slot, which is the only
++            // reliable way to keep the MediaStyle card visible on Xiaomi.
++            // Fall back to notify() only if startForeground throws (e.g. the
++            // service somehow isn't allowed to be foreground anymore — at
++            // least we don't lose the notification entirely).
++            Notification notif = notificationBuilder.build();
++            boolean delivered = false;
++            if (foregroundStarted) {
++                try {
++                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
++                        startForeground(NOTIFICATION_ID, notif,
++                                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK);
++                    } else {
++                        startForeground(NOTIFICATION_ID, notif);
++                    }
++                    delivered = true;
++                } catch (Exception e) {
++                    Log.w(TAG, "Re-startForeground failed; falling back to notify()", e);
++                }
++            }
++            if (!delivered && notificationManager != null) {
++                notificationManager.notify(NOTIFICATION_ID, notif);
++            }
+             notificationUpdate = false;
+         }
+     }
